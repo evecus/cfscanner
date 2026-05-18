@@ -2,11 +2,6 @@ name: Build
 
 on:
   workflow_dispatch:
-    inputs:
-      version:
-        description: '发布版本号 (例如: v1.0.0)'
-        required: true
-        default: 'v1.0.0'
 
 env:
   CARGO_TERM_COLOR: always
@@ -119,8 +114,8 @@ jobs:
       - name: 创建 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.ver.outputs.value }}
-          name: "cfscanner ${{ steps.ver.outputs.value }}"
+          tag_name: v0.1.0
+          name: cfscanner v0.1.0
           files: |
             dist/cfscanner-linux-amd64
             dist/cfscanner-linux-arm64
