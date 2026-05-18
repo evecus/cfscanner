@@ -38,6 +38,10 @@ pub struct ScanConfig {
     /// TCP ping 连接超时（ms）
     #[serde(default = "default_tcp_timeout")]
     pub tcp_timeout_ms: u64,
+
+    /// 随机采样 IP 数量上限，None 表示全量扫描
+    #[serde(default)]
+    pub max_ips: Option<usize>,
 }
 
 /// 测速配置
