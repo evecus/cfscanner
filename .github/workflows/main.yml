@@ -114,8 +114,8 @@ jobs:
       - name: 创建 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.1.0
-          name: cfscanner v0.1.0
+          tag_name: v0.1.1
+          name: cfscanner v0.1.1
           files: |
             dist/cfscanner-linux-amd64
             dist/cfscanner-linux-arm64
