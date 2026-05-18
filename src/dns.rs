@@ -2,7 +2,6 @@ use crate::config::Config;
 use crate::types::IpResult;
 use anyhow::{Context, Result};
 use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::sync::Arc;
 use tokio_rustls::rustls::{self, ClientConfig, ServerName};
 use tracing::{info, warn};
@@ -12,39 +11,63 @@ const CF_API_PORT: u16 = 443;
 
 pub async fn sync_dns(results: &[IpResult], config: &Config) -> Result<()> {
     let dns = &config.dns;
-    if !dns.enable { return Ok(()); }
+    if !dns.enable {
+        return Ok(());
+    }
 
-    let token = dns.token.as_ref().context("dns.token 未配置")?;
-    let zone_id = dns.zone_id.as_ref().context("dns.zone_id 未配置")?;
+    let token = dns.token.as_ref().context("dns.token 未配置")?.clone();
+    let zone_id = dns.zone_id.as_ref().context("dns.zone_id 未配置")?.clone();
 
-    let top_ips: Vec<&IpResult> = results.iter().take(dns.max_records).collect();
+    let top_ips: Vec<IpResult> = results.iter().take(dns.max_records).cloned().collect();
     if top_ips.is_empty() {
         warn!("没有可同步的 IP");
         return Ok(());
     }
 
     info!("开始 DNS 同步，共 {} 条记录", top_ips.len());
+
+    // 整个 DNS 同步在 spawn_blocking 里执行，避免在 tokio 线程上做阻塞 DNS 解析
     let tls = make_tls_config();
+    let config_clone = config.clone();
 
-    for (n, ip_result) in top_ips.iter().enumerate() {
-        let domain = config.dns_domain_for(n + 1).context("无法生成域名")?;
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        for (n, ip_result) in top_ips.iter().enumerate() {
+            let domain = config_clone
+                .dns_domain_for(n + 1)
+                .context("无法生成域名")?;
 
-        // 删除旧记录再创建新记录
-        let existing_ids = list_record_ids(&tls, token, zone_id, &domain)?;
-        for id in &existing_ids {
-            delete_record(&tls, token, zone_id, id)?;
-            info!("删除旧记录 {} id={}", domain, id);
+            // 删除旧记录
+            let existing_ids = list_record_ids(&tls, &token, &zone_id, &domain)?;
+            for id in &existing_ids {
+                delete_record(&tls, &token, &zone_id, id)?;
+                info!("删除旧记录 {} id={}", domain, id);
+            }
+
+            // 创建新记录
+            create_record(
+                &tls,
+                &token,
+                &zone_id,
+                &domain,
+                &ip_result.ip,
+                &config_clone.dns.record_type,
+                config_clone.dns.ttl,
+            )?;
+            info!(
+                "DNS 同步: {} → {} ({}ms)",
+                domain, ip_result.ip, ip_result.delay_ms
+            );
         }
+        info!("DNS 同步完成");
+        Ok(())
+    })
+    .await
+    .context("spawn_blocking 失败")??;
 
-        create_record(&tls, token, zone_id, &domain, &ip_result.ip, &dns.record_type, dns.ttl)?;
-        info!("DNS 同步: {} → {} ({}ms)", domain, ip_result.ip, ip_result.delay_ms);
-    }
-
-    info!("DNS 同步完成");
     Ok(())
 }
 
-/// 同步 HTTPS 请求（用 rustls 手动建链，不依赖 reqwest/ureq）
+/// 同步 HTTPS 请求，完全在 spawn_blocking 内运行，不依赖 tokio DNS
 fn https_request(
     tls: &Arc<ClientConfig>,
     method: &str,
@@ -52,14 +75,37 @@ fn https_request(
     token: &str,
     body: Option<&str>,
 ) -> Result<String> {
+    // 用标准库同步 DNS + TCP 连接，在 spawn_blocking 内调用完全安全
+    let addrs: Vec<std::net::SocketAddr> = format!("{}:{}", CF_API_HOST, CF_API_PORT)
+        .parse::<std::net::SocketAddr>()
+        .map(|a| vec![a])
+        .unwrap_or_else(|_| {
+            // 字符串包含域名，走系统 getaddrinfo（此时在 blocking 线程，安全）
+            use std::net::ToSocketAddrs;
+            format!("{}:{}", CF_API_HOST, CF_API_PORT)
+                .to_socket_addrs()
+                .map(|iter| iter.collect())
+                .unwrap_or_default()
+        });
+
+    let addr = addrs
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("无法解析 {} 的地址", CF_API_HOST))?;
+
     let server_name = ServerName::try_from(CF_API_HOST)?;
     let conn = rustls::ClientConnection::new(Arc::clone(tls), server_name)?;
-    let tcp = TcpStream::connect(format!("{}:{}", CF_API_HOST, CF_API_PORT))?;
-    tcp.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
+    let tcp = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(10))?;
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(15)))?;
+    tcp.set_write_timeout(Some(std::time::Duration::from_secs(10)))?;
     let mut stream = rustls::StreamOwned::new(conn, tcp);
 
-    let content_type = if body.is_some() { "Content-Type: application/json\r\n" } else { "" };
     let body_str = body.unwrap_or("");
+    let content_type = if body.is_some() {
+        "Content-Type: application/json\r\n"
+    } else {
+        ""
+    };
     let content_length = if body.is_some() {
         format!("Content-Length: {}\r\n", body_str.len())
     } else {
@@ -77,7 +123,6 @@ fn https_request(
     let mut response = Vec::new();
     stream.read_to_end(&mut response)?;
 
-    // 分离 headers 和 body
     let response_str = String::from_utf8_lossy(&response);
     if let Some(pos) = response_str.find("\r\n\r\n") {
         Ok(response_str[pos + 4..].to_string())
@@ -86,8 +131,16 @@ fn https_request(
     }
 }
 
-fn list_record_ids(tls: &Arc<ClientConfig>, token: &str, zone_id: &str, name: &str) -> Result<Vec<String>> {
-    let path = format!("/client/v4/zones/{}/dns_records?name={}&per_page=100", zone_id, name);
+fn list_record_ids(
+    tls: &Arc<ClientConfig>,
+    token: &str,
+    zone_id: &str,
+    name: &str,
+) -> Result<Vec<String>> {
+    let path = format!(
+        "/client/v4/zones/{}/dns_records?name={}&per_page=100",
+        zone_id, name
+    );
     let body = https_request(tls, "GET", &path, token, None)?;
     let v: serde_json::Value = serde_json::from_str(&body)?;
     let ids = v["result"]
@@ -99,8 +152,16 @@ fn list_record_ids(tls: &Arc<ClientConfig>, token: &str, zone_id: &str, name: &s
     Ok(ids)
 }
 
-fn delete_record(tls: &Arc<ClientConfig>, token: &str, zone_id: &str, record_id: &str) -> Result<()> {
-    let path = format!("/client/v4/zones/{}/dns_records/{}", zone_id, record_id);
+fn delete_record(
+    tls: &Arc<ClientConfig>,
+    token: &str,
+    zone_id: &str,
+    record_id: &str,
+) -> Result<()> {
+    let path = format!(
+        "/client/v4/zones/{}/dns_records/{}",
+        zone_id, record_id
+    );
     https_request(tls, "DELETE", &path, token, None)?;
     Ok(())
 }
@@ -128,24 +189,12 @@ fn create_record(
 }
 
 fn make_tls_config() -> Arc<ClientConfig> {
-    use rustls::client::ServerCertVerifier;
-
-    struct NoVerify;
-    impl ServerCertVerifier for NoVerify {
-        fn verify_server_cert(
-            &self, _: &rustls::Certificate, _: &[rustls::Certificate],
-            _: &ServerName, _: &mut dyn Iterator<Item=&[u8]>,
-            _: &[u8], _: std::time::SystemTime,
-        ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
-            Ok(rustls::client::ServerCertVerified::assertion())
-        }
-    }
-
-    // CF API 用正常证书验证
     let mut roots = rustls::RootCertStore::empty();
     roots.add_server_trust_anchors(webpki_roots::TLS_SERVER_ROOTS.iter().map(|ta| {
         rustls::OwnedTrustAnchor::from_subject_spki_name_constraints(
-            ta.subject, ta.spki, ta.name_constraints,
+            ta.subject,
+            ta.spki,
+            ta.name_constraints,
         )
     }));
 
