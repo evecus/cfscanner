@@ -147,9 +147,11 @@ async fn run_daemon(config: Config) -> Result<()> {
             .to_std()
             .unwrap_or(std::time::Duration::from_secs(1));
 
+        // 转换为系统本地时区显示
+        let next_local = next.with_timezone(&chrono::Local);
         println!(
             "下次执行: {}  (等待 {})",
-            next.format("%Y-%m-%d %H:%M:%S UTC"),
+            next_local.format("%Y-%m-%d %H:%M:%S %Z"),
             format_duration(wait)
         );
 

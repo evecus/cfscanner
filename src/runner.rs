@@ -90,7 +90,7 @@ pub async fn run_speed_only(
 
     info!(
         "读取上次扫描结果（{}），共 {} 个 IP",
-        state.scanned_at.format("%Y-%m-%d %H:%M:%S UTC"),
+        state.scanned_at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S %Z"),
         state.results.len()
     );
 
@@ -146,7 +146,7 @@ pub fn run_show(config: &Config) -> Result<()> {
         .map_err(|_| anyhow::anyhow!("找不到测速结果，请先运行完整流程"))?;
     println!(
         "上次扫描时间: {}",
-        state.scanned_at.format("%Y-%m-%d %H:%M:%S UTC")
+        state.scanned_at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S %Z")
     );
     print_speed_table(&state.results);
     Ok(())

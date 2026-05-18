@@ -2,9 +2,10 @@ use crate::config::Config;
 use crate::types::IpResult;
 use anyhow::{Context, Result};
 use std::io::{Read, Write};
+use std::net::ToSocketAddrs;
 use std::sync::Arc;
 use tokio_rustls::rustls::{self, ClientConfig, ServerName};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 const CF_API_HOST: &str = "api.cloudflare.com";
 const CF_API_PORT: u16 = 443;
@@ -26,7 +27,6 @@ pub async fn sync_dns(results: &[IpResult], config: &Config) -> Result<()> {
 
     info!("开始 DNS 同步，共 {} 条记录", top_ips.len());
 
-    // 整个 DNS 同步在 spawn_blocking 里执行，避免在 tokio 线程上做阻塞 DNS 解析
     let tls = make_tls_config();
     let config_clone = config.clone();
 
@@ -36,14 +36,12 @@ pub async fn sync_dns(results: &[IpResult], config: &Config) -> Result<()> {
                 .dns_domain_for(n + 1)
                 .context("无法生成域名")?;
 
-            // 删除旧记录
             let existing_ids = list_record_ids(&tls, &token, &zone_id, &domain)?;
             for id in &existing_ids {
                 delete_record(&tls, &token, &zone_id, id)?;
                 info!("删除旧记录 {} id={}", domain, id);
             }
 
-            // 创建新记录
             create_record(
                 &tls,
                 &token,
@@ -67,7 +65,25 @@ pub async fn sync_dns(results: &[IpResult], config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// 同步 HTTPS 请求，完全在 spawn_blocking 内运行，不依赖 tokio DNS
+/// 解析域名，IPv4 地址排在前面
+fn resolve_host(host: &str, port: u16) -> Result<Vec<std::net::SocketAddr>> {
+    let all: Vec<std::net::SocketAddr> = format!("{}:{}", host, port)
+        .to_socket_addrs()
+        .map_err(|e| anyhow::anyhow!("DNS 解析 {} 失败: {}", host, e))?
+        .collect();
+
+    if all.is_empty() {
+        anyhow::bail!("DNS 解析 {} 返回空结果", host);
+    }
+
+    // IPv4 优先，服务器可能没有 IPv6 出站
+    let mut sorted: Vec<std::net::SocketAddr> =
+        all.iter().filter(|a| a.is_ipv4()).cloned().collect();
+    sorted.extend(all.iter().filter(|a| a.is_ipv6()).cloned());
+
+    Ok(sorted)
+}
+
 fn https_request(
     tls: &Arc<ClientConfig>,
     method: &str,
@@ -75,29 +91,31 @@ fn https_request(
     token: &str,
     body: Option<&str>,
 ) -> Result<String> {
-    // 用标准库同步 DNS + TCP 连接，在 spawn_blocking 内调用完全安全
-    let addrs: Vec<std::net::SocketAddr> = format!("{}:{}", CF_API_HOST, CF_API_PORT)
-        .parse::<std::net::SocketAddr>()
-        .map(|a| vec![a])
-        .unwrap_or_else(|_| {
-            // 字符串包含域名，走系统 getaddrinfo（此时在 blocking 线程，安全）
-            use std::net::ToSocketAddrs;
-            format!("{}:{}", CF_API_HOST, CF_API_PORT)
-                .to_socket_addrs()
-                .map(|iter| iter.collect())
-                .unwrap_or_default()
-        });
+    let addrs = resolve_host(CF_API_HOST, CF_API_PORT)?;
+    let timeout = std::time::Duration::from_secs(10);
 
-    let addr = addrs
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("无法解析 {} 的地址", CF_API_HOST))?;
+    // 逐个地址尝试，直到连接成功
+    let mut tcp_opt: Option<std::net::TcpStream> = None;
+    let mut last_err = String::new();
+    for addr in &addrs {
+        match std::net::TcpStream::connect_timeout(addr, timeout) {
+            Ok(tcp) => {
+                tcp_opt = Some(tcp);
+                break;
+            }
+            Err(e) => {
+                debug!("连接 {} 失败: {}，尝试下一个", addr, e);
+                last_err = format!("连接 {} 失败: {}", addr, e);
+            }
+        }
+    }
+
+    let tcp = tcp_opt.ok_or_else(|| anyhow::anyhow!("所有地址均连接失败，最后错误: {}", last_err))?;
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(15)))?;
+    tcp.set_write_timeout(Some(std::time::Duration::from_secs(10)))?;
 
     let server_name = ServerName::try_from(CF_API_HOST)?;
     let conn = rustls::ClientConnection::new(Arc::clone(tls), server_name)?;
-    let tcp = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(10))?;
-    tcp.set_read_timeout(Some(std::time::Duration::from_secs(15)))?;
-    tcp.set_write_timeout(Some(std::time::Duration::from_secs(10)))?;
     let mut stream = rustls::StreamOwned::new(conn, tcp);
 
     let body_str = body.unwrap_or("");
@@ -158,10 +176,7 @@ fn delete_record(
     zone_id: &str,
     record_id: &str,
 ) -> Result<()> {
-    let path = format!(
-        "/client/v4/zones/{}/dns_records/{}",
-        zone_id, record_id
-    );
+    let path = format!("/client/v4/zones/{}/dns_records/{}", zone_id, record_id);
     https_request(tls, "DELETE", &path, token, None)?;
     Ok(())
 }
