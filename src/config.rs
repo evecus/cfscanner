@@ -39,8 +39,8 @@ pub struct ScanConfig {
     #[serde(default = "default_tcp_timeout")]
     pub tcp_timeout_ms: u64,
 
-    /// 随机采样 IP 数量上限，None 表示全量扫描
-    #[serde(default)]
+    /// 随机采样 IP 数量上限，不配置默认 5500
+    #[serde(default = "default_max_ips")]
     pub max_ips: Option<usize>,
 }
 
@@ -137,6 +137,7 @@ pub struct OutputConfig {
 // ── 默认值函数 ──────────────────────────────────────────────────
 
 fn default_scan_mode() -> String { "ipv4".into() }
+fn default_max_ips() -> Option<usize> { Some(5500) }
 fn default_port() -> u16 { 443 }
 fn default_concurrency() -> usize { 150 }
 fn default_delay_threshold() -> u64 { 220 }

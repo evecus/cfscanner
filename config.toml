@@ -7,7 +7,7 @@ concurrency = 150
 delay_threshold = 220   # ms，超过则丢弃
 ping_count = 2
 tcp_timeout_ms = 1000
-max_ips = 5000          # 随机采样 IP 数量，删除此行则全量扫描
+max_ips = 5500          # 随机采样上限，不填默认 5500，填 0 或删除此行效果相同
 
 [speed_test]
 auto_run = true
