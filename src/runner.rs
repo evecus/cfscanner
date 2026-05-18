@@ -16,7 +16,7 @@ pub async fn run_full(config: &Config) -> Result<()> {
 
     // 1. 加载 IP 列表
     info!("加载 IP 列表，模式: {}", config.scan.mode);
-    let ips = load_ips(&config.scan.mode)?;
+    let ips = load_ips(&config.scan.mode, config.scan.max_ips)?;
     info!("共加载 {} 个 IP", ips.len());
 
     // 2. 扫描延迟
@@ -132,7 +132,7 @@ pub async fn run_speed_only(
 
 /// 仅扫描延迟，不测速
 pub async fn run_scan_only(config: &Config) -> Result<()> {
-    let ips = load_ips(&config.scan.mode)?;
+    let ips = load_ips(&config.scan.mode, config.scan.max_ips)?;
     info!("共加载 {} 个 IP", ips.len());
 
     let total = ips.len();
