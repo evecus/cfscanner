@@ -2,10 +2,11 @@ use crate::config::ScanConfig;
 use crate::types::IpResult;
 use anyhow::Result;
 use rand::Rng;
+use rustls::{ClientConfig, ServerName};
+use std::io::{Read, Write};
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
@@ -83,7 +84,7 @@ async fn tcp_ping(addr: &str, cfg: &ScanConfig) -> Option<u64> {
     samples.into_iter().min()
 }
 
-/// 用纯 tokio TCP 发 HTTP/1.1 请求获取 colo，不依赖任何 HTTP 库
+/// 通过 TLS 连接发送 HTTP/1.1 请求获取 colo 字段
 async fn fetch_colo(ip: IpAddr, port: u16) -> Option<String> {
     let addr = format!("{}:{}", ip, port);
     let request = format!(
@@ -91,37 +92,73 @@ async fn fetch_colo(ip: IpAddr, port: u16) -> Option<String> {
         random_ua()
     );
 
-    let mut stream = timeout(
-        Duration::from_millis(1500),
-        TcpStream::connect(&addr),
-    ).await.ok()?.ok()?;
+    // 使用 spawn_blocking 在阻塞线程中做同步 TLS（与 speed_tester 保持一致）
+    let result = tokio::task::spawn_blocking(move || -> Option<String> {
+        let tcp = std::net::TcpStream::connect_timeout(
+            &addr.parse().ok()?,
+            Duration::from_millis(1500),
+        ).ok()?;
+        tcp.set_read_timeout(Some(Duration::from_millis(2000))).ok()?;
 
-    timeout(Duration::from_millis(1500), stream.write_all(request.as_bytes()))
-        .await.ok()?.ok()?;
+        let tls_config = make_trust_all_tls();
+        let server_name = ServerName::try_from("speed.cloudflare.com").ok()?;
+        let conn = rustls::ClientConnection::new(Arc::new(tls_config), server_name).ok()?;
+        let mut stream = rustls::StreamOwned::new(conn, tcp);
 
-    let mut buf = Vec::with_capacity(2048);
-    let _ = timeout(Duration::from_millis(1500), async {
+        stream.write_all(request.as_bytes()).ok()?;
+        stream.flush().ok()?;
+
+        let mut buf = Vec::with_capacity(4096);
         let mut tmp = [0u8; 512];
         loop {
-            match stream.read(&mut tmp).await {
-                Ok(0) | Err(_) => break,
+            match stream.read(&mut tmp) {
+                Ok(0) => break,
                 Ok(n) => {
                     buf.extend_from_slice(&tmp[..n]);
                     if buf.len() > 8192 { break; }
                 }
+                Err(e) if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => break,
+                Err(_) => break,
             }
         }
-    }).await;
 
-    let body = String::from_utf8_lossy(&buf);
-    for line in body.lines() {
-        if let Some(colo) = line.strip_prefix("colo=") {
-            let c = colo.trim().to_uppercase();
-            if !c.is_empty() { return Some(c); }
+        let body = String::from_utf8_lossy(&buf);
+        for line in body.lines() {
+            if let Some(colo) = line.strip_prefix("colo=") {
+                let c = colo.trim().to_uppercase();
+                if !c.is_empty() { return Some(c); }
+            }
+        }
+        None
+    }).await.ok()?;
+
+    if result.is_none() {
+        warn!("未找到 colo 字段，IP: {}", ip);
+    }
+    result
+}
+
+fn make_trust_all_tls() -> ClientConfig {
+    use rustls::client::ServerCertVerifier;
+    struct NoVerify;
+    impl ServerCertVerifier for NoVerify {
+        fn verify_server_cert(
+            &self, _: &rustls::Certificate, _: &[rustls::Certificate],
+            _: &ServerName, _: &mut dyn Iterator<Item = &[u8]>,
+            _: &[u8], _: std::time::SystemTime,
+        ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
+            Ok(rustls::client::ServerCertVerified::assertion())
         }
     }
-    warn!("未找到 colo 字段，IP: {}", ip);
-    None
+    let mut config = ClientConfig::builder()
+        .with_safe_defaults()
+        .with_root_certificates(rustls::RootCertStore::empty())
+        .with_no_client_auth();
+    config.dangerous().set_certificate_verifier(Arc::new(NoVerify));
+    config
 }
 
 fn random_ua() -> &'static str {
