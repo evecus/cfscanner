@@ -8,7 +8,7 @@ const IPV4_CIDRS: &str = include_str!("../assets/ipv4.txt");
 const IPV6_CIDRS: &str = include_str!("../assets/ipv6.txt");
 const COLO_DATA: &str = include_str!("../assets/colo.txt");
 
-pub fn load_ips(mode: &str) -> Result<Vec<IpAddr>> {
+pub fn load_ips(mode: &str, max_ips: Option<usize>) -> Result<Vec<IpAddr>> {
     let mut ips = Vec::new();
     match mode {
         "ipv4" => ips.extend(expand_cidrs(IPV4_CIDRS)?),
@@ -20,6 +20,9 @@ pub fn load_ips(mode: &str) -> Result<Vec<IpAddr>> {
         _ => anyhow::bail!("未知 mode: {}", mode),
     }
     ips.shuffle(&mut rand::thread_rng());
+    if let Some(n) = max_ips {
+        ips.truncate(n);
+    }
     Ok(ips)
 }
 
