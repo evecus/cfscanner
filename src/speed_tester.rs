@@ -7,7 +7,7 @@ use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Semaphore;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 pub async fn run_speed_tests(
     results: &mut Vec<IpResult>,
@@ -26,16 +26,20 @@ pub async fn run_speed_tests(
         .map(|(i, _)| i)
         .collect();
 
-    info!("开始测速，共 {} 个 IP", indices.len());
+    let total = indices.len();
+    if total == 0 {
+        println!("  没有符合条件的 IP 可供测速");
+        return Ok(());
+    }
 
     let sem = Arc::new(Semaphore::new(5));
-    let cfg = Arc::new(cfg.clone());
+    let cfg_arc = Arc::new(cfg.clone());
     let mut handles = Vec::new();
 
     for &idx in &indices {
         let ip = results[idx].ip.clone();
         let port = results[idx].port;
-        let cfg = cfg.clone();
+        let cfg = cfg_arc.clone();
         let sem = sem.clone();
         handles.push(tokio::task::spawn_blocking(move || {
             let _permit = futures_lite::future::block_on(sem.acquire()).unwrap();
@@ -43,24 +47,39 @@ pub async fn run_speed_tests(
         }));
     }
 
+    let mut done = 0usize;
     for handle in handles {
         match handle.await {
             Ok((idx, Ok(speed))) => {
-                info!("{} 测速: {:.2} MB/s", results[idx].ip, speed);
+                done += 1;
                 results[idx].speed_mbps = Some(speed);
+                println!(
+                    "  [{}/{}] {} | {}ms | {:.2} MB/s",
+                    done, total, results[idx].ip, results[idx].delay_ms, speed
+                );
             }
-            Ok((idx, Err(e))) => warn!("{} 测速失败: {}", results[idx].ip, e),
-            Err(e) => warn!("测速 task panic: {}", e),
+            Ok((idx, Err(e))) => {
+                done += 1;
+                println!(
+                    "  [{}/{}] {} | 测速失败: {}",
+                    done, total, results[idx].ip, e
+                );
+                warn!("{} 测速失败: {}", results[idx].ip, e);
+            }
+            Err(e) => {
+                warn!("测速 task panic: {}", e);
+            }
         }
     }
 
+    // 按速度降序排列
     results.sort_by(|a, b| {
-        b.speed_mbps.unwrap_or(0.0)
+        b.speed_mbps
+            .unwrap_or(0.0)
             .partial_cmp(&a.speed_mbps.unwrap_or(0.0))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    info!("测速完成");
     Ok(())
 }
 
@@ -98,7 +117,9 @@ fn measure_speed(ip: &str, port: u16, cfg: &SpeedTestConfig) -> Result<f64> {
                     header_end_time = Instant::now();
                     break;
                 }
-                if header_buf.len() > 32 * 1024 { anyhow::bail!("HTTP 头过长"); }
+                if header_buf.len() > 32 * 1024 {
+                    anyhow::bail!("HTTP 头过长");
+                }
             }
             Err(e) => anyhow::bail!("读头失败: {}", e),
         }
@@ -109,18 +130,34 @@ fn measure_speed(ip: &str, port: u16, cfg: &SpeedTestConfig) -> Result<f64> {
     let mut buf = vec![0u8; 16 * 1024];
     let max_dur = std::time::Duration::from_millis(cfg.duration_ms);
     loop {
-        if header_end_time.elapsed() >= max_dur { break; }
+        if header_end_time.elapsed() >= max_dur {
+            break;
+        }
         match stream.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => total_bytes += n as u64,
-            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => break,
-            Err(e) => { debug!("读取中断: {}", e); break; }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                break
+            }
+            Err(e) => {
+                debug!("读取中断: {}", e);
+                break;
+            }
         }
     }
 
     let elapsed_ms = header_end_time.elapsed().as_millis() as f64;
     if elapsed_ms < 100.0 || total_bytes == 0 {
-        anyhow::bail!("数据不足 bytes={} elapsed={}ms", total_bytes, elapsed_ms);
+        anyhow::bail!(
+            "数据不足 bytes={} elapsed={}ms",
+            total_bytes,
+            elapsed_ms
+        );
     }
 
     Ok((total_bytes as f64 * 1000.0) / elapsed_ms / 1_048_576.0)
@@ -131,9 +168,13 @@ fn make_trust_all_tls() -> ClientConfig {
     struct NoVerify;
     impl ServerCertVerifier for NoVerify {
         fn verify_server_cert(
-            &self, _: &rustls::Certificate, _: &[rustls::Certificate],
-            _: &ServerName, _: &mut dyn Iterator<Item=&[u8]>,
-            _: &[u8], _: std::time::SystemTime,
+            &self,
+            _: &rustls::Certificate,
+            _: &[rustls::Certificate],
+            _: &ServerName,
+            _: &mut dyn Iterator<Item = &[u8]>,
+            _: &[u8],
+            _: std::time::SystemTime,
         ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
             Ok(rustls::client::ServerCertVerified::assertion())
         }
@@ -142,6 +183,8 @@ fn make_trust_all_tls() -> ClientConfig {
         .with_safe_defaults()
         .with_root_certificates(rustls::RootCertStore::empty())
         .with_no_client_auth();
-    config.dangerous().set_certificate_verifier(Arc::new(NoVerify));
+    config
+        .dangerous()
+        .set_certificate_verifier(Arc::new(NoVerify));
     config
 }

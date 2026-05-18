@@ -10,7 +10,9 @@ mod types;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use config::Config;
+use cron::Schedule;
 use std::path::PathBuf;
+use std::str::FromStr;
 use tracing::info;
 
 #[derive(Parser, Debug)]
@@ -39,12 +41,10 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         all: bool,
     },
-    /// 显示上次扫描/测速结果
+    /// 显示上次测速结果
     Show,
     /// 将上次结果同步到 Cloudflare DNS
     Sync,
-    /// 常驻进程模式，按 cron 定时触发
-    Daemon,
     /// 生成示例配置文件
     Init {
         #[arg(default_value = "config.toml")]
@@ -67,70 +67,101 @@ async fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&config.output.log_level)),
         )
+        .without_time()
         .init();
 
-    info!("配置文件加载成功: {}", cli.config.display());
+    // ── 判断运行模式 ──────────────────────────────────────────────
+    // 子命令优先；无子命令时根据 schedule 配置决定行为
+    match cli.command {
+        Some(Commands::Run) => {
+            runner::run_full(&config).await?;
+        }
+        Some(Commands::Scan) => {
+            runner::run_scan_only(&config).await?;
+        }
+        Some(Commands::Speed { region, all }) => {
+            runner::run_speed_only(&config, region, all).await?;
+        }
+        Some(Commands::Show) => {
+            runner::run_show(&config)?;
+        }
+        Some(Commands::Sync) => {
+            runner::run_sync_only(&config).await?;
+        }
+        Some(Commands::Init { .. }) => unreachable!(),
 
-    match cli.command.unwrap_or(Commands::Run) {
-        Commands::Run => runner::run_full(&config).await?,
-        Commands::Daemon => run_daemon(config).await?,
-        Commands::Scan => runner::run_scan_only(&config).await?,
-        Commands::Speed { region, all } => runner::run_speed_only(&config, region, all).await?,
-        Commands::Show => runner::run_show(&config)?,
-        Commands::Sync => runner::run_sync_only(&config).await?,
-        Commands::Init { .. } => unreachable!(),
+        // 无子命令：根据 schedule 配置决定
+        None => {
+            if is_daemon_mode(&config) {
+                run_daemon(config).await?;
+            } else {
+                runner::run_full(&config).await?;
+                // run_full 返回后进程自然退出
+            }
+        }
     }
 
     Ok(())
 }
 
-/// 常驻进程：用 cron crate 解析表达式，tokio::time::sleep 等待下次触发
-async fn run_daemon(config: Config) -> Result<()> {
-    use cron::Schedule;
-    use std::str::FromStr;
-
+/// 判断是否应该进入 daemon 模式：
+/// schedule.enable=true 且 cron 表达式能被正确解析
+fn is_daemon_mode(config: &Config) -> bool {
     if !config.schedule.enable {
-        anyhow::bail!("schedule.enable = false，无法启动 daemon 模式");
+        return false;
     }
-
-    let schedule = Schedule::from_str(&config.schedule.cron)
-        .map_err(|e| anyhow::anyhow!("cron 表达式解析失败: {}", e))?;
-
-    info!("Daemon 启动，cron: {}", config.schedule.cron);
-
-    // 立即执行一次
-    info!("首次立即执行...");
-    if let Err(e) = runner::run_full(&config).await {
-        tracing::error!("首次运行失败: {}", e);
+    match Schedule::from_str(&config.schedule.cron) {
+        Ok(_) => {
+            info!("检测到有效的 cron 配置，进入 daemon 模式");
+            true
+        }
+        Err(e) => {
+            tracing::warn!(
+                "cron 表达式 \"{}\" 解析失败（{}），退回单次执行模式",
+                config.schedule.cron,
+                e
+            );
+            false
+        }
     }
+}
+
+/// Daemon 模式：
+/// - 启动时不立即执行任务
+/// - 按 cron 等待触发，执行完后继续等待
+/// - Ctrl+C / SIGTERM 优雅退出
+async fn run_daemon(config: Config) -> Result<()> {
+    let schedule = Schedule::from_str(&config.schedule.cron)?;
+
+    println!("━━━ daemon 模式启动 ━━━");
+    println!("cron : {}", config.schedule.cron);
 
     loop {
-        // 计算下次触发时间
-        let now = chrono::Utc::now();
+        // 计算到下次触发的等待时长
         let next = match schedule.upcoming(chrono::Utc).next() {
             Some(t) => t,
-            None => {
-                anyhow::bail!("cron 表达式没有下一次触发时间，退出");
-            }
+            None => anyhow::bail!("cron 没有下一个触发时间，退出"),
         };
+        let now = chrono::Utc::now();
+        let wait = (next - now)
+            .to_std()
+            .unwrap_or(std::time::Duration::from_secs(1));
 
-        let wait = (next - now).to_std().unwrap_or(std::time::Duration::from_secs(1));
-        info!(
-            "下次执行时间: {}，等待 {:.0} 秒",
+        println!(
+            "下次执行: {}  (等待 {})",
             next.format("%Y-%m-%d %H:%M:%S UTC"),
-            wait.as_secs_f64()
+            format_duration(wait)
         );
 
-        // 等待，同时响应 Ctrl+C
         tokio::select! {
             _ = tokio::time::sleep(wait) => {
-                info!("定时触发，开始执行");
+                println!("\n━━━ cron 触发，开始执行 ━━━");
                 if let Err(e) = runner::run_full(&config).await {
-                    tracing::error!("定时任务失败: {}", e);
+                    tracing::error!("执行失败: {:#}", e);
                 }
             }
             _ = tokio::signal::ctrl_c() => {
-                info!("收到退出信号，daemon 停止");
+                println!("\n收到退出信号，daemon 停止");
                 break;
             }
         }
@@ -139,8 +170,23 @@ async fn run_daemon(config: Config) -> Result<()> {
     Ok(())
 }
 
+fn format_duration(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m{}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
 fn write_example_config(path: &PathBuf) -> Result<()> {
     const EXAMPLE: &str = r#"# cfscanner 配置文件
+#
+# 启动行为：
+#   schedule.enable=true 且 cron 合法 → daemon 模式（等 cron 触发，不立即执行）
+#   否则 → 执行一次完整流程后退出
 
 [scan]
 mode = "ipv4"           # ipv4 / ipv6 / both
@@ -149,6 +195,7 @@ concurrency = 150
 delay_threshold = 220   # ms，超过则丢弃
 ping_count = 2
 tcp_timeout_ms = 1000
+max_ips = 5000          # 随机采样上限，删除此行则全量扫描
 
 [speed_test]
 auto_run = true
@@ -160,7 +207,7 @@ duration_ms = 3000
 connect_timeout_ms = 3000
 
 [schedule]
-enable = true
+enable = false          # true + 合法 cron → daemon 模式
 cron = "0 */6 * * *"   # 每6小时
 
 [dns]
@@ -175,7 +222,7 @@ ttl = 60
 [output]
 # file = "/var/log/cfscanner/results.csv"
 state_file = "/tmp/cfscanner_state.json"
-log_level = "info"
+log_level = "warn"      # daemon 模式建议 warn，减少日志噪声
 "#;
 
     if path.exists() {

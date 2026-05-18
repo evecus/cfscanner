@@ -1,8 +1,11 @@
 use crate::config::ScanConfig;
+use crate::output::print_scan_params;
 use crate::types::IpResult;
 use anyhow::Result;
+use indicatif::{ProgressBar, ProgressStyle};
 use rand::Rng;
 use rustls::{ClientConfig, ServerName};
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -10,32 +13,51 @@ use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
-use tracing::{debug, warn};
+use tracing::debug;
 
-pub async fn scan_ips(
-    ips: Vec<IpAddr>,
-    cfg: &ScanConfig,
-    progress_cb: impl Fn(usize, usize, Option<&IpResult>) + Send + Sync + 'static,
-) -> Result<Vec<IpResult>> {
+pub async fn scan_ips(ips: Vec<IpAddr>, cfg: &ScanConfig) -> Result<Vec<IpResult>> {
     let total = ips.len();
+
+    // 打印扫描参数
+    print_scan_params(cfg, total);
+
+    // 进度条
+    let pb = ProgressBar::new(total as u64);
+    pb.set_style(
+        ProgressStyle::with_template(
+            "{spinner:.cyan} [{elapsed_precise}] [{bar:45.green/white}] {pos}/{len}  命中: {msg}",
+        )
+        .unwrap()
+        .progress_chars("█▉▊▋▌▍▎▏ "),
+    );
+    pb.set_message("0");
+    let pb = Arc::new(pb);
+
     let sem = Arc::new(Semaphore::new(cfg.concurrency));
     let cfg = Arc::new(cfg.clone());
-    let cb = Arc::new(progress_cb);
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Option<IpResult>>(512);
 
+    // channel 收集结果
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Option<IpResult>>(1024);
+
+    // 收集器：更新进度条 + 统计命中数
+    let pb_c = pb.clone();
     let collector = tokio::spawn(async move {
-        let mut results = Vec::new();
-        let mut done = 0usize;
+        let mut results: Vec<IpResult> = Vec::new();
+        let mut hits = 0usize;
         while let Some(maybe) = rx.recv().await {
-            done += 1;
-            cb(done, total, maybe.as_ref());
-            if let Some(r) = maybe { results.push(r); }
+            pb_c.inc(1);
+            if let Some(r) = maybe {
+                hits += 1;
+                pb_c.set_message(hits.to_string());
+                results.push(r);
+            }
         }
         results.sort_by_key(|r| r.delay_ms);
         results
     });
 
-    let mut handles = Vec::with_capacity(ips.len());
+    // 派发任务
+    let mut handles = Vec::with_capacity(total);
     for ip in ips {
         let sem = sem.clone();
         let cfg = cfg.clone();
@@ -47,8 +69,17 @@ pub async fn scan_ips(
     }
     drop(tx);
 
-    for h in handles { let _ = h.await; }
-    Ok(collector.await?)
+    for h in handles {
+        let _ = h.await;
+    }
+
+    let results = collector.await?;
+    pb.finish_and_clear();
+
+    // 扫描完成后打印地区汇总
+    print_scan_result_summary(&results);
+
+    Ok(results)
 }
 
 async fn scan_single(ip: IpAddr, cfg: &ScanConfig) -> Option<IpResult> {
@@ -59,7 +90,6 @@ async fn scan_single(ip: IpAddr, cfg: &ScanConfig) -> Option<IpResult> {
         return None;
     }
     let colo = fetch_colo(ip, cfg.port).await?;
-    debug!("{} delay={}ms colo={}", ip, delay, colo);
     Some(IpResult::new(ip.to_string(), cfg.port, delay, colo))
 }
 
@@ -71,10 +101,11 @@ async fn tcp_ping(addr: &str, cfg: &ScanConfig) -> Option<u64> {
         match timeout(dur, TcpStream::connect(addr)).await {
             Ok(Ok(_)) => {
                 let ms = start.elapsed().as_millis() as u64;
-                if ms > 0 { samples.push(ms); }
+                if ms > 0 {
+                    samples.push(ms);
+                }
             }
-            Ok(Err(_)) => return None,
-            Err(_) => return None,
+            _ => return None,
         }
         if i < cfg.ping_count - 1 {
             let wait = rand::thread_rng().gen_range(10u64..=30);
@@ -84,7 +115,6 @@ async fn tcp_ping(addr: &str, cfg: &ScanConfig) -> Option<u64> {
     samples.into_iter().min()
 }
 
-/// 通过 TLS 连接发送 HTTP/1.1 请求获取 colo 字段
 async fn fetch_colo(ip: IpAddr, port: u16) -> Option<String> {
     let addr = format!("{}:{}", ip, port);
     let request = format!(
@@ -92,12 +122,12 @@ async fn fetch_colo(ip: IpAddr, port: u16) -> Option<String> {
         random_ua()
     );
 
-    // 使用 spawn_blocking 在阻塞线程中做同步 TLS（与 speed_tester 保持一致）
     let result = tokio::task::spawn_blocking(move || -> Option<String> {
         let tcp = std::net::TcpStream::connect_timeout(
             &addr.parse().ok()?,
             Duration::from_millis(1500),
-        ).ok()?;
+        )
+        .ok()?;
         tcp.set_read_timeout(Some(Duration::from_millis(2000))).ok()?;
 
         let tls_config = make_trust_all_tls();
@@ -115,12 +145,18 @@ async fn fetch_colo(ip: IpAddr, port: u16) -> Option<String> {
                 Ok(0) => break,
                 Ok(n) => {
                     buf.extend_from_slice(&tmp[..n]);
-                    if buf.len() > 8192 { break; }
+                    if buf.len() > 8192 {
+                        break;
+                    }
                 }
-                Err(e) if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) => break,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    break
+                }
                 Err(_) => break,
             }
         }
@@ -129,26 +165,56 @@ async fn fetch_colo(ip: IpAddr, port: u16) -> Option<String> {
         for line in body.lines() {
             if let Some(colo) = line.strip_prefix("colo=") {
                 let c = colo.trim().to_uppercase();
-                if !c.is_empty() { return Some(c); }
+                if !c.is_empty() {
+                    return Some(c);
+                }
             }
         }
         None
-    }).await.ok()?;
+    })
+    .await
+    .ok()?;
 
-    if result.is_none() {
-        warn!("未找到 colo 字段，IP: {}", ip);
-    }
     result
 }
 
-fn make_trust_all_tls() -> ClientConfig {
+/// 扫描完成后：按地区码汇总打印
+fn print_scan_result_summary(results: &[IpResult]) {
+    if results.is_empty() {
+        println!("  延迟扫描：未找到可用 IP");
+        return;
+    }
+    let mut by_colo: HashMap<&str, usize> = HashMap::new();
+    for r in results {
+        *by_colo.entry(r.colo.as_str()).or_insert(0) += 1;
+    }
+    let mut list: Vec<(&str, usize)> = by_colo.into_iter().collect();
+    list.sort_by(|a, b| b.1.cmp(&a.1));
+
+    let summary: Vec<String> = list
+        .iter()
+        .map(|(colo, n)| format!("{}: {}", colo, n))
+        .collect();
+
+    println!(
+        "延迟扫描完成  共 {} 个可用 IP  |  {}",
+        results.len(),
+        summary.join("  |  ")
+    );
+}
+
+pub fn make_trust_all_tls() -> ClientConfig {
     use rustls::client::ServerCertVerifier;
     struct NoVerify;
     impl ServerCertVerifier for NoVerify {
         fn verify_server_cert(
-            &self, _: &rustls::Certificate, _: &[rustls::Certificate],
-            _: &ServerName, _: &mut dyn Iterator<Item = &[u8]>,
-            _: &[u8], _: std::time::SystemTime,
+            &self,
+            _: &rustls::Certificate,
+            _: &[rustls::Certificate],
+            _: &ServerName,
+            _: &mut dyn Iterator<Item = &[u8]>,
+            _: &[u8],
+            _: std::time::SystemTime,
         ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
             Ok(rustls::client::ServerCertVerified::assertion())
         }
@@ -157,7 +223,9 @@ fn make_trust_all_tls() -> ClientConfig {
         .with_safe_defaults()
         .with_root_certificates(rustls::RootCertStore::empty())
         .with_no_client_auth();
-    config.dangerous().set_certificate_verifier(Arc::new(NoVerify));
+    config
+        .dangerous()
+        .set_certificate_verifier(Arc::new(NoVerify));
     config
 }
 
