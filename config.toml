@@ -1,0 +1,37 @@
+# cfscanner 配置文件
+
+[scan]
+mode = "ipv4"           # ipv4 / ipv6 / both
+port = 443
+concurrency = 150
+delay_threshold = 220   # ms，超过则丢弃
+ping_count = 2
+tcp_timeout_ms = 1000
+max_ips = 5000          # 随机采样 IP 数量，删除此行则全量扫描
+
+[speed_test]
+auto_run = true
+mode = "region"         # region / full
+regions = ["LAX", "HKG", "NRT"]
+top_n = 10
+download_bytes = 10485760
+duration_ms = 3000
+connect_timeout_ms = 3000
+
+[schedule]
+enable = false
+cron = "0 */6 * * *"   # 每6小时
+
+[dns]
+enable = false
+token = "your_cloudflare_api_token"
+zone_id = "your_zone_id"
+domain = "cf.example.com"
+record_type = "A"
+max_records = 5
+ttl = 60
+
+[output]
+# file = "/var/log/cfscanner/results.csv"
+state_file = "/tmp/cfscanner_state.json"
+log_level = "info"
