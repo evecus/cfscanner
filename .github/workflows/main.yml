@@ -1,0 +1,166 @@
+name: Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '发布版本号 (例如: v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+
+env:
+  CARGO_TERM_COLOR: always
+  BINARY_NAME: cfscanner
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux amd64（静态链接 musl，真正零依赖）
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-22.04
+            artifact: cfscanner-linux-amd64
+
+          # Linux arm64（静态链接 musl）
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-22.04
+            artifact: cfscanner-linux-arm64
+
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: 缓存 Cargo 依赖
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-cargo-
+
+      # amd64 musl 直接用 musl-tools
+      - name: 安装 musl 工具链（amd64）
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y musl-tools
+
+      # arm64 cross 编译需要 cross 工具
+      - name: 安装 cross（arm64）
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      # amd64 直接 cargo build
+      - name: 编译（amd64）
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          cargo build --release --target ${{ matrix.target }}
+
+      # arm64 用 cross（内部用 Docker 模拟）
+      - name: 编译（arm64）
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: |
+          cross build --release --target ${{ matrix.target }}
+
+      - name: 准备产物
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/${{ env.BINARY_NAME }} \
+             dist/${{ matrix.artifact }}
+          # 校验文件
+          file dist/${{ matrix.artifact }}
+          ls -lh dist/${{ matrix.artifact }}
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+          retention-days: 30
+
+  # 如果是 tag 推送，自动创建 Release
+  release:
+    name: 发布 Release
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: 下载所有产物
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 显示产物列表
+        run: ls -lh dist/
+
+      - name: 生成 SHA256 校验文件
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.value }}
+          name: "cfscanner ${{ steps.ver.outputs.value }}"
+          files: |
+            dist/cfscanner-linux-amd64
+            dist/cfscanner-linux-arm64
+            dist/SHA256SUMS.txt
+          body: |
+            ## cfscanner ${{ github.ref_name }}
+
+            ### 下载
+
+            | 平台 | 文件 |
+            |------|------|
+            | Linux x86_64 | `cfscanner-linux-amd64` |
+            | Linux ARM64  | `cfscanner-linux-arm64` |
+
+            ### 使用
+
+            ```bash
+            # 生成配置文件
+            ./cfscanner init
+
+            # 完整流程（扫描 → 测速 → DNS 同步）
+            ./cfscanner -c config.toml run
+
+            # 仅扫描延迟
+            ./cfscanner -c config.toml scan
+
+            # 按地区测速
+            ./cfscanner -c config.toml speed --region LAX,HKG
+
+            # 全量测速
+            ./cfscanner -c config.toml speed --all
+
+            # 常驻进程（按 cron 定时）
+            ./cfscanner -c config.toml daemon
+            ```
+
+            ### 校验
+
+            ```bash
+            sha256sum -c SHA256SUMS.txt
+            ```
+          draft: false
+          prerelease: false
