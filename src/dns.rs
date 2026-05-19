@@ -32,9 +32,7 @@ pub async fn sync_dns(results: &[IpResult], config: &Config) -> Result<()> {
 
     tokio::task::spawn_blocking(move || -> Result<()> {
         for (n, ip_result) in top_ips.iter().enumerate() {
-            let domain = config_clone
-                .dns_domain_for(n + 1)
-                .context("无法生成域名")?;
+            let domain = config_clone.dns_domain_for(n + 1).context("无法生成域名")?;
 
             let existing_ids = list_record_ids(&tls, &token, &zone_id, &domain)?;
             for id in &existing_ids {
@@ -110,7 +108,8 @@ fn https_request(
         }
     }
 
-    let tcp = tcp_opt.ok_or_else(|| anyhow::anyhow!("所有地址均连接失败，最后错误: {}", last_err))?;
+    let tcp =
+        tcp_opt.ok_or_else(|| anyhow::anyhow!("所有地址均连接失败，最后错误: {}", last_err))?;
     tcp.set_read_timeout(Some(std::time::Duration::from_secs(15)))?;
     tcp.set_write_timeout(Some(std::time::Duration::from_secs(10)))?;
 

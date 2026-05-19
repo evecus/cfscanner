@@ -90,7 +90,10 @@ pub async fn run_speed_only(
 
     info!(
         "读取上次扫描结果（{}），共 {} 个 IP",
-        state.scanned_at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S %Z"),
+        state
+            .scanned_at
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M:%S %Z"),
         state.results.len()
     );
 
@@ -99,7 +102,10 @@ pub async fn run_speed_only(
     } else if let Some(r) = regions_override {
         ("region".to_string(), r)
     } else {
-        (config.speed_test.mode.clone(), config.speed_test.regions.clone())
+        (
+            config.speed_test.mode.clone(),
+            config.speed_test.regions.clone(),
+        )
     };
 
     let regions_filter = if mode == "region" && !regions.is_empty() {
@@ -111,7 +117,8 @@ pub async fn run_speed_only(
     print_speed_params(config, regions_filter);
     run_speed_tests(&mut state.results, &config.speed_test, regions_filter).await?;
 
-    let speed_results: Vec<_> = state.results
+    let speed_results: Vec<_> = state
+        .results
         .into_iter()
         .filter(|r| r.speed_mbps.is_some())
         .collect();
@@ -146,7 +153,10 @@ pub fn run_show(config: &Config) -> Result<()> {
         .map_err(|_| anyhow::anyhow!("找不到测速结果，请先运行完整流程"))?;
     println!(
         "上次扫描时间: {}",
-        state.scanned_at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S %Z")
+        state
+            .scanned_at
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M:%S %Z")
     );
     print_speed_table(&state.results);
     Ok(())

@@ -28,10 +28,7 @@ pub fn print_speed_params(config: &Config, regions_filter: Option<&[String]>) {
         println!("  地区筛选    : {}", regions.join(", "));
     }
     println!("  测速数量    : top {}", cfg.top_n);
-    println!(
-        "  下载量      : {} MB",
-        cfg.download_bytes / 1024 / 1024
-    );
+    println!("  下载量      : {} MB", cfg.download_bytes / 1024 / 1024);
     println!("  持续时长    : {} ms", cfg.duration_ms);
     println!();
     println!("  IP                  延迟     速度");

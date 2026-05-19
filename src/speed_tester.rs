@@ -89,11 +89,13 @@ fn measure_speed(ip: &str, port: u16, cfg: &SpeedTestConfig) -> Result<f64> {
         &addr.parse()?,
         std::time::Duration::from_millis(cfg.connect_timeout_ms),
     )?;
-    tcp.set_read_timeout(Some(std::time::Duration::from_millis(cfg.duration_ms + 3000)))?;
+    tcp.set_read_timeout(Some(std::time::Duration::from_millis(
+        cfg.duration_ms + 3000,
+    )))?;
 
     let tls_config = make_trust_all_tls();
-    let server_name = ServerName::try_from("speed.cloudflare.com")
-        .map_err(|e| anyhow::anyhow!("{:?}", e))?;
+    let server_name =
+        ServerName::try_from("speed.cloudflare.com").map_err(|e| anyhow::anyhow!("{:?}", e))?;
     let conn = rustls::ClientConnection::new(Arc::new(tls_config), server_name)?;
     let mut stream = rustls::StreamOwned::new(conn, tcp);
 
@@ -153,11 +155,7 @@ fn measure_speed(ip: &str, port: u16, cfg: &SpeedTestConfig) -> Result<f64> {
 
     let elapsed_ms = header_end_time.elapsed().as_millis() as f64;
     if elapsed_ms < 100.0 || total_bytes == 0 {
-        anyhow::bail!(
-            "数据不足 bytes={} elapsed={}ms",
-            total_bytes,
-            elapsed_ms
-        );
+        anyhow::bail!("数据不足 bytes={} elapsed={}ms", total_bytes, elapsed_ms);
     }
 
     Ok((total_bytes as f64 * 1000.0) / elapsed_ms / 1_048_576.0)

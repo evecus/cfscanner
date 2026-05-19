@@ -73,7 +73,12 @@ pub fn load_ips(mode: &str, max_ips: Option<usize>) -> Result<Vec<IpAddr>> {
 
 /// 从一个网段中随机采样 `take` 个 IP，直接追加到 `out`
 /// 不展开整个网段，通过随机偏移量直接生成目标 IP
-fn sample_from_network(network: &IpNetwork, take: usize, rng: &mut impl Rng, out: &mut Vec<IpAddr>) {
+fn sample_from_network(
+    network: &IpNetwork,
+    take: usize,
+    rng: &mut impl Rng,
+    out: &mut Vec<IpAddr>,
+) {
     match network {
         IpNetwork::V4(net) => {
             let base = u32::from(net.network());
@@ -102,7 +107,11 @@ fn sample_from_network(network: &IpNetwork, take: usize, rng: &mut impl Rng, out
             let base = u128::from(net.network());
             // IPv6 网段极大，直接随机偏移
             let mask_bits = 128 - net.prefix();
-            let size: u128 = if mask_bits >= 128 { u128::MAX } else { 1u128 << mask_bits };
+            let size: u128 = if mask_bits >= 128 {
+                u128::MAX
+            } else {
+                1u128 << mask_bits
+            };
 
             let mut seen = std::collections::HashSet::with_capacity(take);
             let mut attempts = 0;

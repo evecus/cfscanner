@@ -123,12 +123,11 @@ async fn fetch_colo(ip: IpAddr, port: u16) -> Option<String> {
     );
 
     let result = tokio::task::spawn_blocking(move || -> Option<String> {
-        let tcp = std::net::TcpStream::connect_timeout(
-            &addr.parse().ok()?,
-            Duration::from_millis(1500),
-        )
-        .ok()?;
-        tcp.set_read_timeout(Some(Duration::from_millis(2000))).ok()?;
+        let tcp =
+            std::net::TcpStream::connect_timeout(&addr.parse().ok()?, Duration::from_millis(1500))
+                .ok()?;
+        tcp.set_read_timeout(Some(Duration::from_millis(2000)))
+            .ok()?;
 
         let tls_config = make_trust_all_tls();
         let server_name = ServerName::try_from("speed.cloudflare.com").ok()?;

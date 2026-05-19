@@ -136,24 +136,60 @@ pub struct OutputConfig {
 
 // ── 默认值函数 ──────────────────────────────────────────────────
 
-fn default_scan_mode() -> String { "ipv4".into() }
-fn default_max_ips() -> Option<usize> { Some(5500) }
-fn default_port() -> u16 { 443 }
-fn default_concurrency() -> usize { 150 }
-fn default_delay_threshold() -> u64 { 220 }
-fn default_ping_count() -> usize { 2 }
-fn default_tcp_timeout() -> u64 { 1000 }
-fn default_speed_mode() -> String { "full".into() }
-fn default_top_n() -> usize { 10 }
-fn default_download_bytes() -> usize { 10 * 1024 * 1024 } // 10 MB
-fn default_speed_duration() -> u64 { 3000 }
-fn default_speed_timeout() -> u64 { 3000 }
-fn default_cron() -> String { "0 */6 * * *".into() }
-fn default_record_type() -> String { "A".into() }
-fn default_max_records() -> usize { 5 }
-fn default_ttl() -> u32 { 60 }
-fn default_state_file() -> String { "/tmp/cfscanner_state.json".into() }
-fn default_log_level() -> String { "info".into() }
+fn default_scan_mode() -> String {
+    "ipv4".into()
+}
+fn default_max_ips() -> Option<usize> {
+    Some(5500)
+}
+fn default_port() -> u16 {
+    443
+}
+fn default_concurrency() -> usize {
+    150
+}
+fn default_delay_threshold() -> u64 {
+    220
+}
+fn default_ping_count() -> usize {
+    2
+}
+fn default_tcp_timeout() -> u64 {
+    1000
+}
+fn default_speed_mode() -> String {
+    "full".into()
+}
+fn default_top_n() -> usize {
+    10
+}
+fn default_download_bytes() -> usize {
+    10 * 1024 * 1024
+} // 10 MB
+fn default_speed_duration() -> u64 {
+    3000
+}
+fn default_speed_timeout() -> u64 {
+    3000
+}
+fn default_cron() -> String {
+    "0 */6 * * *".into()
+}
+fn default_record_type() -> String {
+    "A".into()
+}
+fn default_max_records() -> usize {
+    5
+}
+fn default_ttl() -> u32 {
+    60
+}
+fn default_state_file() -> String {
+    "/tmp/cfscanner_state.json".into()
+}
+fn default_log_level() -> String {
+    "info".into()
+}
 
 // ── 加载函数 ────────────────────────────────────────────────────
 
@@ -161,8 +197,7 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("无法读取配置文件: {}", path.display()))?;
-        let config: Config = toml::from_str(&content)
-            .with_context(|| "配置文件解析失败")?;
+        let config: Config = toml::from_str(&content).with_context(|| "配置文件解析失败")?;
         config.validate()?;
         Ok(config)
     }
@@ -170,12 +205,18 @@ impl Config {
     fn validate(&self) -> Result<()> {
         let valid_modes = ["ipv4", "ipv6", "both"];
         if !valid_modes.contains(&self.scan.mode.as_str()) {
-            anyhow::bail!("scan.mode 必须是 ipv4 / ipv6 / both，当前: {}", self.scan.mode);
+            anyhow::bail!(
+                "scan.mode 必须是 ipv4 / ipv6 / both，当前: {}",
+                self.scan.mode
+            );
         }
 
         let valid_speed_modes = ["region", "full"];
         if !valid_speed_modes.contains(&self.speed_test.mode.as_str()) {
-            anyhow::bail!("speed_test.mode 必须是 region / full，当前: {}", self.speed_test.mode);
+            anyhow::bail!(
+                "speed_test.mode 必须是 region / full，当前: {}",
+                self.speed_test.mode
+            );
         }
 
         if self.speed_test.mode == "region" && self.speed_test.regions.is_empty() {

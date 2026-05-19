@@ -16,7 +16,13 @@ pub struct IpResult {
 
 impl IpResult {
     pub fn new(ip: String, port: u16, delay_ms: u64, colo: String) -> Self {
-        Self { ip, port, delay_ms, colo, speed_mbps: None }
+        Self {
+            ip,
+            port,
+            delay_ms,
+            colo,
+            speed_mbps: None,
+        }
     }
 
     /// 用于表格显示的速度字符串
@@ -37,7 +43,10 @@ pub struct ScanState {
 
 impl ScanState {
     pub fn new(results: Vec<IpResult>) -> Self {
-        Self { scanned_at: Utc::now(), results }
+        Self {
+            scanned_at: Utc::now(),
+            results,
+        }
     }
 
     /// 保存到文件
