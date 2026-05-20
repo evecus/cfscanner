@@ -82,12 +82,7 @@ pub async fn sync_dns(results: &[IpResult], config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn https_request(
-    method: &str,
-    path: &str,
-    token: &str,
-    body: Option<&str>,
-) -> Result<String> {
+fn https_request(method: &str, path: &str, token: &str, body: Option<&str>) -> Result<String> {
     let url = format!("{}{}", CF_API_BASE, path);
     let req = ureq::request(method, &url)
         .set("Authorization", &format!("Bearer {}", token))
