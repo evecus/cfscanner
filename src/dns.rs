@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::types::IpResult;
 use anyhow::{Context, Result};
-use tracing::{info, warn};
+use tracing::warn;
 
 const CF_API_BASE: &str = "https://api.cloudflare.com";
 
@@ -20,34 +20,60 @@ pub async fn sync_dns(results: &[IpResult], config: &Config) -> Result<()> {
         return Ok(());
     }
 
-    info!("开始 DNS 同步，共 {} 条记录", top_ips.len());
+    println!();
+    println!("━━━ DNS 同步 ━━━");
+    println!("  共 {} 条记录待同步", top_ips.len());
+    println!();
 
     let config_clone = config.clone();
 
     tokio::task::spawn_blocking(move || -> Result<()> {
+        let mut ok_count = 0usize;
+        let mut fail_count = 0usize;
+
         for (n, ip_result) in top_ips.iter().enumerate() {
             let domain = config_clone.dns_domain_for(n + 1).context("无法生成域名")?;
 
-            let existing_ids = list_record_ids(&token, &zone_id, &domain)?;
-            for id in &existing_ids {
-                delete_record(&token, &zone_id, id)?;
-                info!("删除旧记录 {} id={}", domain, id);
+            // 删除旧记录
+            match list_record_ids(&token, &zone_id, &domain) {
+                Ok(ids) => {
+                    for id in &ids {
+                        match delete_record(&token, &zone_id, id) {
+                            Ok(_) => println!("  [删除] {} (id={})", domain, id),
+                            Err(e) => println!("  [删除失败] {} id={}: {}", domain, id, e),
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("  [查询失败] {}: {}", domain, e);
+                }
             }
 
-            create_record(
+            // 创建新记录
+            match create_record(
                 &token,
                 &zone_id,
                 &domain,
                 &ip_result.ip,
                 &config_clone.dns.record_type,
                 config_clone.dns.ttl,
-            )?;
-            info!(
-                "DNS 同步: {} → {} ({}ms)",
-                domain, ip_result.ip, ip_result.delay_ms
-            );
+            ) {
+                Ok(_) => {
+                    ok_count += 1;
+                    println!(
+                        "  [成功] {} → {}  延迟 {}ms",
+                        domain, ip_result.ip, ip_result.delay_ms
+                    );
+                }
+                Err(e) => {
+                    fail_count += 1;
+                    println!("  [失败] {} → {}  {}", domain, ip_result.ip, e);
+                }
+            }
         }
-        info!("DNS 同步完成");
+
+        println!();
+        println!("DNS 同步完成  成功 {}  失败 {}", ok_count, fail_count);
         Ok(())
     })
     .await
