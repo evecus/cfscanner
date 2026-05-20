@@ -104,13 +104,25 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// 将用户输入的 cron 表达式统一为 6 段式（cron 库要求有秒字段）
+/// 用户写 5 段（分 时 日 月 周）时，自动在最前面补 "0"（秒固定为 0）
+fn normalize_cron(expr: &str) -> String {
+    let parts: Vec<&str> = expr.split_whitespace().collect();
+    if parts.len() == 5 {
+        format!("0 {}", expr)
+    } else {
+        expr.to_string()
+    }
+}
+
 /// 判断是否应该进入 daemon 模式：
 /// schedule.enable=true 且 cron 表达式能被正确解析
 fn is_daemon_mode(config: &Config) -> bool {
     if !config.schedule.enable {
         return false;
     }
-    match Schedule::from_str(&config.schedule.cron) {
+    let expr = normalize_cron(&config.schedule.cron);
+    match Schedule::from_str(&expr) {
         Ok(_) => {
             info!("检测到有效的 cron 配置，进入 daemon 模式");
             true
@@ -131,27 +143,31 @@ fn is_daemon_mode(config: &Config) -> bool {
 /// - 按 cron 等待触发，执行完后继续等待
 /// - Ctrl+C / SIGTERM 优雅退出
 async fn run_daemon(config: Config) -> Result<()> {
-    let schedule = Schedule::from_str(&config.schedule.cron)?;
+    let expr = normalize_cron(&config.schedule.cron);
+    let schedule = Schedule::from_str(&expr)?;
 
     println!("━━━ daemon 模式启动 ━━━");
-    println!("cron : {}", config.schedule.cron);
+    // 显示用户原始表达式，以及实际解析用的表达式（若有补秒）
+    if expr != config.schedule.cron {
+        println!("cron : {}  （已自动补秒，实际: {}）", config.schedule.cron, expr);
+    } else {
+        println!("cron : {}", config.schedule.cron);
+    }
 
     loop {
-        // 计算到下次触发的等待时长
-        let next = match schedule.upcoming(chrono::Utc).next() {
+        // 用本地时区计算下次触发时间，避免 UTC 与本地时区偏差
+        let now_local = chrono::Local::now();
+        let next = match schedule.upcoming(chrono::Local).next() {
             Some(t) => t,
             None => anyhow::bail!("cron 没有下一个触发时间，退出"),
         };
-        let now = chrono::Utc::now();
-        let wait = (next - now)
+        let wait = (next - now_local)
             .to_std()
             .unwrap_or(std::time::Duration::from_secs(1));
 
-        // 转换为系统本地时区显示
-        let next_local = next.with_timezone(&chrono::Local);
         println!(
             "下次执行: {}  (等待 {})",
-            next_local.format("%Y-%m-%d %H:%M:%S %Z"),
+            next.format("%Y-%m-%d %H:%M:%S %Z"),
             format_duration(wait)
         );
 
