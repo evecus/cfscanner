@@ -1,0 +1,87 @@
+name: Build
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  BINARY_NAME: cfscanner
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+
+          # Android ARM64（新加入）
+          - target: aarch64-linux-android
+            os: ubuntu-22.04
+            artifact: cfscanner-android-arm64
+
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: 缓存 Cargo 依赖
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-cargo-
+
+      # amd64 musl 直接用 musl-tools
+      - name: 安装 musl 工具链（amd64）
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y musl-tools
+
+      # arm64 / Android 编译都需要 cross 工具
+      - name: 安装 cross 工具（ARM64 & Android）
+        if: matrix.target == 'aarch64-unknown-linux-musl' || matrix.target == 'aarch64-linux-android'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      # amd64 直接 cargo build
+      - name: 编译（amd64）
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          cargo build --release --target ${{ matrix.target }}
+
+      # arm64 和 Android 统一用 cross（内部用 Docker 模拟，无需手动配置 Android NDK）
+      - name: 编译（ARM64 & Android）
+        if: matrix.target == 'aarch64-unknown-linux-musl' || matrix.target == 'aarch64-linux-android'
+        run: |
+          cross build --release --target ${{ matrix.target }}
+
+      - name: 准备产物
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/${{ env.BINARY_NAME }} \
+             dist/${{ matrix.artifact }}
+          # 校验文件
+          file dist/${{ matrix.artifact }}
+          ls -lh dist/${{ matrix.artifact }}
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+          retention-days: 30
+
+  # 如果是 tag 推送，自动创建 Release
+  
