@@ -6,9 +6,15 @@ use tracing::warn;
 const CF_API_BASE: &str = "https://api.cloudflare.com";
 
 pub async fn sync_dns(results: &[IpResult], config: &Config) -> Result<()> {
+    sync_dns_with_log(results, config).await?;
+    Ok(())
+}
+
+/// 同 sync_dns，但额外返回每条操作的日志行，供 Web 状态页展示
+pub async fn sync_dns_with_log(results: &[IpResult], config: &Config) -> Result<Vec<String>> {
     let dns = &config.dns;
     if !dns.enable {
-        return Ok(());
+        return Ok(vec![]);
     }
 
     let token = dns.token.as_ref().context("dns.token 未配置")?.clone();
@@ -17,7 +23,7 @@ pub async fn sync_dns(results: &[IpResult], config: &Config) -> Result<()> {
     let top_ips: Vec<IpResult> = results.iter().take(dns.max_records).cloned().collect();
     if top_ips.is_empty() {
         warn!("没有可同步的 IP");
-        return Ok(());
+        return Ok(vec!["没有可同步的 IP".to_string()]);
     }
 
     println!();
@@ -27,14 +33,14 @@ pub async fn sync_dns(results: &[IpResult], config: &Config) -> Result<()> {
 
     let config_clone = config.clone();
 
-    tokio::task::spawn_blocking(move || -> Result<()> {
+    let log = tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
+        let mut lines: Vec<String> = vec![];
         let mut ok_count = 0usize;
         let mut fail_count = 0usize;
 
         for (n, ip_result) in top_ips.iter().enumerate() {
             let domain = config_clone.dns_domain_for(n + 1).context("无法生成域名")?;
 
-            // 删除旧记录
             match list_record_ids(&token, &zone_id, &domain) {
                 Ok(ids) => {
                     for id in &ids {
@@ -49,7 +55,6 @@ pub async fn sync_dns(results: &[IpResult], config: &Config) -> Result<()> {
                 }
             }
 
-            // 创建新记录
             match create_record(
                 &token,
                 &zone_id,
@@ -60,26 +65,31 @@ pub async fn sync_dns(results: &[IpResult], config: &Config) -> Result<()> {
             ) {
                 Ok(_) => {
                     ok_count += 1;
-                    println!(
-                        "  [成功] {} → {}  延迟 {}ms",
+                    let line = format!(
+                        "[成功] {} → {}  延迟 {}ms",
                         domain, ip_result.ip, ip_result.delay_ms
                     );
+                    println!("  {}", line);
+                    lines.push(line);
                 }
                 Err(e) => {
                     fail_count += 1;
-                    println!("  [失败] {} → {}  {}", domain, ip_result.ip, e);
+                    let line = format!("[失败] {} → {}  {}", domain, ip_result.ip, e);
+                    println!("  {}", line);
+                    lines.push(line);
                 }
             }
         }
 
         println!();
         println!("DNS 同步完成  成功 {}  失败 {}", ok_count, fail_count);
-        Ok(())
+        lines.push(format!("同步完成  成功 {}  失败 {}", ok_count, fail_count));
+        Ok(lines)
     })
     .await
     .context("spawn_blocking 失败")??;
 
-    Ok(())
+    Ok(log)
 }
 
 fn https_request(

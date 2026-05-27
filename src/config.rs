@@ -48,7 +48,7 @@ pub struct ScanConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct SpeedTestConfig {
     /// 扫描完成后是否自动测速
-    #[serde(default)]
+    #[serde(default = "default_auto_run")]
     pub auto_run: bool,
 
     /// region（按地区）/ full（全部）
@@ -132,21 +132,32 @@ pub struct OutputConfig {
     /// 日志级别：trace / debug / info / warn / error
     #[serde(default = "default_log_level")]
     pub log_level: String,
+
+    /// 是否开启 Web 状态页（仅 daemon 模式生效）
+    #[serde(default)]
+    pub web_show: bool,
+
+    /// Web 状态页监听端口（默认 5000）
+    #[serde(default = "default_web_port")]
+    pub web_port: u16,
 }
 
 // ── 默认值函数 ──────────────────────────────────────────────────
 
+fn default_auto_run() -> bool {
+    true
+}
 fn default_scan_mode() -> String {
     "ipv4".into()
 }
 fn default_max_ips() -> Option<usize> {
-    Some(5500)
+    Some(8000)
 }
 fn default_port() -> u16 {
     443
 }
 fn default_concurrency() -> usize {
-    150
+    100
 }
 fn default_delay_threshold() -> u64 {
     220
@@ -184,6 +195,9 @@ fn default_max_records() -> usize {
 fn default_ttl() -> u32 {
     60
 }
+fn default_web_port() -> u16 {
+    5000
+}
 fn default_state_file() -> String {
     "/tmp/cfscanner_state.json".into()
 }
@@ -199,6 +213,14 @@ impl Config {
             .with_context(|| format!("无法读取配置文件: {}", path.display()))?;
         let config: Config = toml::from_str(&content).with_context(|| "配置文件解析失败")?;
         config.validate()?;
+        Ok(config)
+    }
+
+    /// 不依赖配置文件，全部使用内置默认值运行一次
+    pub fn default_config() -> Result<Self> {
+        // 用最小合法 TOML 触发所有 serde default
+        let minimal = "[scan]\n[speed_test]\n[schedule]\n[dns]\n[output]\n";
+        let config: Config = toml::from_str(minimal).context("内置默认配置解析失败")?;
         Ok(config)
     }
 

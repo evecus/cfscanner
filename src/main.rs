@@ -6,6 +6,7 @@ mod runner;
 mod scanner;
 mod speed_tester;
 mod types;
+mod web;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -60,7 +61,16 @@ async fn main() -> Result<()> {
         return write_example_config(output);
     }
 
-    let config = Config::load(&cli.config)?;
+    let config = if cli.config.exists() {
+        Config::load(&cli.config)?
+    } else if cli.config.to_string_lossy() == "config.toml" {
+        // 未指定 -c 且默认路径不存在，使用内置默认值
+        println!("未找到配置文件，使用内置默认参数运行...");
+        Config::default_config()?
+    } else {
+        // 用户明确用 -c 指定了路径但文件不存在，报错
+        Config::load(&cli.config)?
+    };
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -74,7 +84,7 @@ async fn main() -> Result<()> {
     // 子命令优先；无子命令时根据 schedule 配置决定行为
     match cli.command {
         Some(Commands::Run) => {
-            runner::run_full(&config).await?;
+            runner::run_full(&config, None).await?;
         }
         Some(Commands::Scan) => {
             runner::run_scan_only(&config).await?;
@@ -95,8 +105,7 @@ async fn main() -> Result<()> {
             if is_daemon_mode(&config) {
                 run_daemon(config).await?;
             } else {
-                runner::run_full(&config).await?;
-                // run_full 返回后进程自然退出
+                runner::run_full(&config, None).await?;
             }
         }
     }
@@ -141,13 +150,23 @@ fn is_daemon_mode(config: &Config) -> bool {
 /// Daemon 模式：
 /// - 启动时不立即执行任务
 /// - 按 cron 等待触发，执行完后继续等待
+/// - web_show=true 时启动 HTTP 状态页
+/// - 访问 /retest 可立即触发一次重测
 /// - Ctrl+C / SIGTERM 优雅退出
 async fn run_daemon(config: Config) -> Result<()> {
     let expr = normalize_cron(&config.schedule.cron);
     let schedule = Schedule::from_str(&expr)?;
 
+    // 启动 Web 状态页
+    let web_state = if config.output.web_show {
+        let ws = web::WebState::new("3.0.0");
+        web::start(config.output.web_port, ws.clone());
+        Some(ws)
+    } else {
+        None
+    };
+
     println!("━━━ daemon 模式启动 ━━━");
-    // 显示用户原始表达式，以及实际解析用的表达式（若有补秒）
     if expr != config.schedule.cron {
         println!("cron : {}  （已自动补秒，实际: {}）", config.schedule.cron, expr);
     } else {
@@ -155,7 +174,6 @@ async fn run_daemon(config: Config) -> Result<()> {
     }
 
     loop {
-        // 用本地时区计算下次触发时间，避免 UTC 与本地时区偏差
         let now_local = chrono::Local::now();
         let next = match schedule.upcoming(chrono::Local).next() {
             Some(t) => t,
@@ -171,21 +189,47 @@ async fn run_daemon(config: Config) -> Result<()> {
             format_duration(wait)
         );
 
-        tokio::select! {
+        // 每秒检查一次 retest 标志，同时等待 cron 触发或 Ctrl+C
+        let triggered = tokio::select! {
+            _ = wait_for_retest(web_state.as_ref()) => {
+                println!("\n━━━ /retest 触发，立即执行 ━━━");
+                true
+            }
             _ = tokio::time::sleep(wait) => {
                 println!("\n━━━ cron 触发，开始执行 ━━━");
-                if let Err(e) = runner::run_full(&config).await {
-                    tracing::error!("执行失败: {:#}", e);
-                }
+                true
             }
             _ = tokio::signal::ctrl_c() => {
                 println!("\n收到退出信号，daemon 停止");
-                break;
+                false
             }
+        };
+
+        if !triggered {
+            break;
+        }
+
+        if let Err(e) = runner::run_full(&config, web_state.as_ref()).await {
+            tracing::error!("执行失败: {:#}", e);
         }
     }
 
     Ok(())
+}
+
+/// 轮询 WebState 中的 retest 标志，每 500ms 检查一次
+async fn wait_for_retest(ws: Option<&web::WebState>) -> () {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        if let Some(w) = ws {
+            if w.take_retest() {
+                return;
+            }
+        } else {
+            // 没有 web_state，永远不触发，让 select! 的其他分支处理
+            tokio::time::sleep(std::time::Duration::from_secs(86400)).await;
+        }
+    }
 }
 
 fn format_duration(d: std::time::Duration) -> String {
