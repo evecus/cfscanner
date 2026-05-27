@@ -220,7 +220,7 @@ async fn run_daemon(config: Config) -> Result<()> {
 /// 轮询 WebState 中的 retest 标志，每 500ms 检查一次
 async fn wait_for_retest(ws: Option<&web::WebState>) -> () {
     loop {
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
         if let Some(w) = ws {
             if w.take_retest() {
                 return;
