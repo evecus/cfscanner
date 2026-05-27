@@ -35,3 +35,5 @@ ttl = 60
 # file = "/var/log/cfscanner/results.csv"
 state_file = "/tmp/cfscanner_state.json"
 log_level = "info"
+web_show = true       # 开启状态页（仅 daemon 模式生效）
+web_port = 5000       # 可选，默认 5000
