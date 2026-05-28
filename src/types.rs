@@ -12,6 +12,9 @@ pub struct IpResult {
     pub colo: String,
     /// 下载速度（MB/s），None 表示未测速
     pub speed_mbps: Option<f64>,
+    /// 综合评分（speed*0.6 - latency*0.3 - loss*0.1），None 表示未评分
+    #[serde(default)]
+    pub score: Option<f64>,
 }
 
 impl IpResult {
@@ -22,13 +25,20 @@ impl IpResult {
             delay_ms,
             colo,
             speed_mbps: None,
+            score: None,
         }
     }
 
-    /// 用于表格显示的速度字符串
     pub fn speed_display(&self) -> String {
         match self.speed_mbps {
             Some(s) => format!("{:.2} MB/s", s),
+            None => "-".into(),
+        }
+    }
+
+    pub fn score_display(&self) -> String {
+        match self.score {
+            Some(s) => format!("{:.1}", s),
             None => "-".into(),
         }
     }
@@ -49,14 +59,12 @@ impl ScanState {
         }
     }
 
-    /// 保存到文件
     pub fn save(&self, path: &str) -> anyhow::Result<()> {
         let json = serde_json::to_string_pretty(self)?;
         std::fs::write(path, json)?;
         Ok(())
     }
 
-    /// 从文件加载
     pub fn load(path: &str) -> anyhow::Result<Self> {
         let json = std::fs::read_to_string(path)?;
         let state = serde_json::from_str(&json)?;

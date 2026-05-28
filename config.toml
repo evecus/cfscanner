@@ -1,39 +1,79 @@
-# cfscanner 配置文件
+# cfscanner 配置文件（移植 p-box 多线程测速逻辑后版本）
+#
+# 启动行为：
+#   schedule.enable=true 且 cron 合法 → daemon 模式（等 cron 触发，不立即执行）
+#   否则 → 执行一次完整流程后退出
 
+# ─────────────────────────────────────────────
+# 延迟扫描参数
+# ─────────────────────────────────────────────
 [scan]
-mode = "ipv4"           # ipv4 / ipv6 / both
-port = 443
-concurrency = 150
-delay_threshold = 220   # ms，超过则丢弃
-ping_count = 2
-tcp_timeout_ms = 1000
-max_ips = 5500          # 随机采样上限，不填默认 5500，填 0 或删除此行效果相同
+mode             = "ipv4"   # ipv4 / ipv6 / both
+port             = 443
+concurrency      = 150      # 并发 TCP 探测数，越大越快，建议 100~200
+delay_threshold  = 200      # ms，超过此值的 IP 直接丢弃
+ping_count       = 3        # 每个 IP TCP ping 几次，取最小值，建议 2~4
+tcp_timeout_ms   = 1000     # 单次 TCP 连接超时
+max_ips          = 5000     # 随机采样上限；删除此行则全量扫描所有 CF IP 段
 
+# ─────────────────────────────────────────────
+# 测速参数（核心改动）
+# ─────────────────────────────────────────────
 [speed_test]
-auto_run = true
-mode = "region"         # region / full
-regions = ["LAX", "HKG", "NRT"]
-top_n = 10
-download_bytes = 10485760
-duration_ms = 3000
-connect_timeout_ms = 3000
+auto_run         = true
+mode             = "full"   # full=全部测速；region=仅测指定地区
+# regions        = ["LAX", "HKG", "NRT", "SJC"]   # mode=region 时生效
 
+top_n            = 20       # 对延迟最低的前 N 个 IP 做测速
+
+# ── 多线程并发下载（p-box 核心逻辑）──────────────────
+# 对同一 IP 同时建 download_threads 条 TLS 连接，各自独立下载，
+# 汇总总吞吐量。能突破单连接被 QoS 限速的瓶颈。
+# 建议值：4（家宽）~ 8（机房/高带宽）
+download_threads  = 4
+
+# 同时对几个 IP 并行做测速（不同 IP 之间的并发）
+# 建议值：2~4，太大会让测速结果相互干扰
+speed_concurrency = 3
+
+# 每条连接请求的字节数。总下载量 = download_threads × download_bytes
+# 100MB × 4线程 = 400MB，足够让速度稳定
+# 调小可加快测速完成时间，但结果抖动增大
+download_bytes   = 104857600  # 100 MB
+
+# 每个 IP 的最大测速时长（ms）
+# 时间到后停止读取，用已读字节数计算速度
+# 建议 6000~10000，太短速度偏低，太长总耗时增加
+duration_ms      = 8000
+
+# TLS 握手连接超时（ms）
+connect_timeout_ms = 5000
+
+# ─────────────────────────────────────────────
+# 定时任务（daemon 模式）
+# ─────────────────────────────────────────────
 [schedule]
 enable = false
-cron = "0 */6 * * *"   # 每6小时
+cron   = "0 */6 * * *"   # 标准 5 段 cron：分 时 日 月 周
 
+# ─────────────────────────────────────────────
+# Cloudflare DNS 自动同步（可选）
+# ─────────────────────────────────────────────
 [dns]
-enable = false
-token = "your_cloudflare_api_token"
-zone_id = "your_zone_id"
-domain = "cf.example.com"
-record_type = "A"
+enable      = false
+token       = "your_cloudflare_api_token"
+zone_id     = "your_zone_id"
+domain      = "cf.example.com"   # max_records=1 时直接用；>1 时生成 cf1.example.com ...
+record_type = "A"                 # A（IPv4）/ AAAA（IPv6）
 max_records = 5
-ttl = 60
+ttl         = 60
 
+# ─────────────────────────────────────────────
+# 输出
+# ─────────────────────────────────────────────
 [output]
-# file = "/var/log/cfscanner/results.csv"
-state_file = "/tmp/cfscanner_state.json"
-log_level = "info"
-web_show = true       # 开启状态页（仅 daemon 模式生效）
-web_port = 5000       # 可选，默认 5000
+# file       = "results.csv"              # 不填则不输出 CSV
+state_file   = "/tmp/cfscanner_state.json"
+log_level    = "warn"                     # trace/debug/info/warn/error
+web_show     = false                      # daemon 模式下开启 HTTP 状态页
+web_port     = 5000

@@ -5,7 +5,6 @@ use anyhow::Result;
 use comfy_table::{presets::UTF8_FULL, Attribute, Cell, Color, ContentArrangement, Table};
 use std::collections::HashMap;
 
-/// 扫描前打印参数
 pub fn print_scan_params(cfg: &ScanConfig, total_ips: usize) {
     println!();
     println!("━━━ 延迟扫描参数 ━━━");
@@ -18,24 +17,25 @@ pub fn print_scan_params(cfg: &ScanConfig, total_ips: usize) {
     println!();
 }
 
-/// 测速前打印参数
 pub fn print_speed_params(config: &Config, regions_filter: Option<&[String]>) {
     let cfg = &config.speed_test;
     println!();
     println!("━━━ 测速参数 ━━━");
-    println!("  模式        : {}", cfg.mode);
+    println!("  模式          : {}", cfg.mode);
     if let Some(regions) = regions_filter {
-        println!("  地区筛选    : {}", regions.join(", "));
+        println!("  地区筛选      : {}", regions.join(", "));
     }
-    println!("  测速数量    : top {}", cfg.top_n);
-    println!("  下载量      : {} MB", cfg.download_bytes / 1024 / 1024);
-    println!("  持续时长    : {} ms", cfg.duration_ms);
+    println!("  测速数量      : top {}", cfg.top_n);
+    println!("  并发连接数    : {} 条/IP（多线程下载）", cfg.download_threads);
+    println!("  同时测速 IP   : {} 个", cfg.speed_concurrency);
+    println!("  每连接下载量  : {} MB", cfg.download_bytes / 1024 / 1024);
+    println!("  持续时长      : {} ms", cfg.duration_ms);
+    println!("  评分公式      : speed×0.6 - latency×0.3 - loss×0.1");
     println!();
-    println!("  IP                  延迟     速度");
-    println!("  {}", "─".repeat(42));
+    println!("  IP                  延迟     速度        评分");
+    println!("  {}", "─".repeat(52));
 }
 
-/// 扫描完成后的摘要（scan only 子命令用）
 pub fn print_scan_summary(results: &[IpResult]) {
     if results.is_empty() {
         println!("延迟扫描：未找到可用 IP");
@@ -54,7 +54,6 @@ pub fn print_scan_summary(results: &[IpResult]) {
     }
 }
 
-/// 测速结果表格（测速完成后展示）
 pub fn print_speed_table(results: &[IpResult]) {
     println!();
     if results.is_empty() {
@@ -76,6 +75,7 @@ pub fn print_speed_table(results: &[IpResult]) {
             Cell::new("节点").add_attribute(Attribute::Bold),
             Cell::new("城市").add_attribute(Attribute::Bold),
             Cell::new("速度").add_attribute(Attribute::Bold),
+            Cell::new("评分").add_attribute(Attribute::Bold),
         ]);
 
     for (i, r) in results.iter().enumerate() {
@@ -95,8 +95,14 @@ pub fn print_speed_table(results: &[IpResult]) {
         let speed_cell = match r.speed_mbps {
             Some(s) if s >= 5.0 => Cell::new(format!("{:.2} MB/s", s)).fg(Color::Green),
             Some(s) if s >= 1.0 => Cell::new(format!("{:.2} MB/s", s)).fg(Color::Yellow),
-            Some(s) => Cell::new(format!("{:.2} MB/s", s)).fg(Color::Red),
-            None => Cell::new("-"),
+            Some(s)             => Cell::new(format!("{:.2} MB/s", s)).fg(Color::Red),
+            None                => Cell::new("-"),
+        };
+
+        let score_cell = match r.score {
+            Some(s) if s >= 0.0  => Cell::new(format!("{:.1}", s)).fg(Color::Green),
+            Some(s)              => Cell::new(format!("{:.1}", s)).fg(Color::Yellow),
+            None                 => Cell::new("-"),
         };
 
         table.add_row(vec![
@@ -107,28 +113,27 @@ pub fn print_speed_table(results: &[IpResult]) {
             Cell::new(&r.colo),
             Cell::new(&city),
             speed_cell,
+            score_cell,
         ]);
     }
 
     println!("{}", table);
 }
 
-/// 导出 CSV
 pub fn export_csv(results: &[IpResult], path: &str) -> Result<()> {
     use std::fmt::Write as FmtWrite;
     let mut csv = String::new();
-    writeln!(csv, "ip,port,delay_ms,colo,speed_mbps")?;
+    writeln!(csv, "ip,port,delay_ms,colo,speed_mbps,score")?;
     for r in results {
         writeln!(
             csv,
-            "{},{},{},{},{}",
+            "{},{},{},{},{},{}",
             r.ip,
             r.port,
             r.delay_ms,
             r.colo,
-            r.speed_mbps
-                .map(|s| format!("{:.4}", s))
-                .unwrap_or_default()
+            r.speed_mbps.map(|s| format!("{:.4}", s)).unwrap_or_default(),
+            r.score.map(|s| format!("{:.2}", s)).unwrap_or_default(),
         )?;
     }
     std::fs::write(path, &csv)?;
