@@ -160,7 +160,8 @@ async fn run_daemon(config: Config) -> Result<()> {
     // 启动 Web 状态页
     let web_state = if config.output.web_show {
         let ws = web::WebState::new("3.0.0");
-        web::start(config.output.web_port, ws.clone());
+        web::start(config.output.web_port, ws.clone())
+            .map_err(|e| anyhow::anyhow!("Web 服务启动失败 (0.0.0.0:{}): {}", config.output.web_port, e))?;
         Some(ws)
     } else {
         None
