@@ -68,19 +68,13 @@ impl WebState {
 }
 
 /// 在独立线程中启动 HTTP 服务
-pub fn start(port: u16, state: WebState) {
+pub fn start(port: u16, state: WebState) -> std::io::Result<()> {
+    let addr = format!("0.0.0.0:{}", port);
+    // 在主线程 bind，失败立即返回错误，不进入子线程
+    let listener = TcpListener::bind(&addr)?;
+    println!("Web 状态页已启动: http://{}", addr);
+
     std::thread::spawn(move || {
-        let addr = format!("0.0.0.0:{}", port);
-        let listener = match TcpListener::bind(&addr) {
-            Ok(l) => {
-                println!("Web 状态页已启动: http://{}", addr);
-                l
-            }
-            Err(e) => {
-                eprintln!("Web 服务启动失败 ({}): {}", addr, e);
-                return;
-            }
-        };
 
         for stream in listener.incoming() {
             match stream {
@@ -96,6 +90,7 @@ pub fn start(port: u16, state: WebState) {
             }
         }
     });
+    Ok(())
 }
 
 fn read_request_path(stream: &std::net::TcpStream) -> String {
