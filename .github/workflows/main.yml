@@ -2,6 +2,12 @@ name: Build
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. v1.0.0)"
+        required: true
+        default: 'v0.1.0'
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -44,6 +50,13 @@ jobs:
           key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-${{ matrix.target }}-cargo-
+
+      - name: Inject version into Cargo.toml
+        shell: bash
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          VERSION="${VERSION#v}"
+          sed -i "s/^version = .*/version = \"${VERSION}\"/" Cargo.toml
 
       # amd64 musl 直接用 musl-tools
       - name: 安装 musl 工具链（amd64）
