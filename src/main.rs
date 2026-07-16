@@ -259,6 +259,10 @@ delay_threshold = 220   # ms，超过则丢弃
 ping_count = 2
 tcp_timeout_ms = 1000
 max_ips = 5000          # 随机采样上限，删除此行则全量扫描
+# regions = ["LAX", "SJC"]   # 扫描阶段就按地区过滤，不填=不限制
+                             # 一旦填了，max_ips 变成"目标数量"，会自动分批凑够
+batch_size = 3000           # 仅 regions 非空时生效：每批采样量
+max_scan_rounds = 10        # 仅 regions 非空时生效：最多补扫几轮
 
 [speed_test]
 auto_run = true

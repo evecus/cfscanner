@@ -16,10 +16,20 @@ use tokio::time::timeout;
 use tracing::debug;
 
 pub async fn scan_ips(ips: Vec<IpAddr>, cfg: &ScanConfig) -> Result<Vec<IpResult>> {
+    scan_ips_inner(ips, cfg, true).await
+}
+
+/// 同 scan_ips，但可以关闭"扫描参数"面板的打印（分批扫描时只需要打印一次）
+pub async fn scan_ips_quiet(ips: Vec<IpAddr>, cfg: &ScanConfig) -> Result<Vec<IpResult>> {
+    scan_ips_inner(ips, cfg, false).await
+}
+
+async fn scan_ips_inner(ips: Vec<IpAddr>, cfg: &ScanConfig, show_params: bool) -> Result<Vec<IpResult>> {
     let total = ips.len();
 
-    // 打印扫描参数
-    print_scan_params(cfg, total);
+    if show_params {
+        print_scan_params(cfg, total);
+    }
 
     // 进度条
     let pb = ProgressBar::new(total as u64);
@@ -90,6 +100,19 @@ async fn scan_single(ip: IpAddr, cfg: &ScanConfig) -> Option<IpResult> {
         return None;
     }
     let colo = fetch_colo(ip, cfg.port).await?;
+
+    // 扫描阶段地区过滤：cfg.regions 非空时，只保留匹配的地区
+    if !cfg.regions.is_empty() {
+        let matched = cfg
+            .regions
+            .iter()
+            .any(|reg| reg.eq_ignore_ascii_case(&colo));
+        if !matched {
+            debug!("{} colo={} 不在目标地区，丢弃", ip, colo);
+            return None;
+        }
+    }
+
     Some(IpResult::new(ip.to_string(), cfg.port, delay, colo))
 }
 

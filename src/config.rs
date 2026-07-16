@@ -42,6 +42,28 @@ pub struct ScanConfig {
     /// 随机采样 IP 数量上限
     #[serde(default = "default_max_ips")]
     pub max_ips: Option<usize>,
+
+    /// 扫描阶段就按地区过滤（三字码，如 ["LAX","SJC"]）。
+    /// 拿到 colo 后立刻判断，不在列表里的 IP 直接丢弃，不进入后续结果。
+    /// 空列表 = 不过滤（默认，兼容旧行为）。
+    /// 注意：仍然需要对每个延迟达标的 IP 做一次 fetch_colo 请求才能知道它属于哪个地区，
+    /// 这一步开销和不加过滤时相同，只是拿到 colo 后多一次比较、提前丢弃不匹配的结果。
+    #[serde(default)]
+    pub regions: Vec<String>,
+
+    /// regions 非空时，max_ips 的含义变为"目标：凑够这么多个属于目标地区且延迟达标的 IP"，
+    /// 而不是"总共探测这么多个随机 IP"。
+    /// 实现方式：每次从 CIDR 池随机取一批（大小 = batch_size），扫描后累加命中数，
+    /// 不够就再取下一批，直到凑够 max_ips 个，或扫满 max_scan_rounds 轮为止。
+    /// regions 为空时，max_ips 含义不变（老行为：探测这么多个随机 IP，不判断是否够用）。
+    ///
+    /// 每批采样、扫描的 IP 数量（仅 regions 非空时生效）
+    #[serde(default = "default_batch_size")]
+    pub batch_size: usize,
+
+    /// 最多扫描几轮（仅 regions 非空时生效），防止目标地区在 CF 全网占比太低时无限扫下去
+    #[serde(default = "default_max_scan_rounds")]
+    pub max_scan_rounds: usize,
 }
 
 /// 测速配置（新增 download_threads / speed_concurrency）
@@ -141,6 +163,8 @@ pub struct OutputConfig {
 fn default_auto_run()          -> bool         { true }
 fn default_scan_mode()         -> String       { "ipv4".into() }
 fn default_max_ips()           -> Option<usize>{ Some(8000) }
+fn default_batch_size()        -> usize        { 3000 }  // regions 模式下每批采样量
+fn default_max_scan_rounds()   -> usize        { 10 }    // regions 模式下最多扫几轮
 fn default_port()              -> u16          { 443 }
 fn default_concurrency()       -> usize        { 100 }
 fn default_delay_threshold()   -> u64          { 220 }
@@ -187,6 +211,12 @@ impl Config {
                 "scan.mode 必须是 ipv4 / ipv6 / both，当前: {}",
                 self.scan.mode
             );
+        }
+        if self.scan.batch_size == 0 {
+            anyhow::bail!("scan.batch_size 必须 >= 1");
+        }
+        if self.scan.max_scan_rounds == 0 {
+            anyhow::bail!("scan.max_scan_rounds 必须 >= 1");
         }
         let valid_speed_modes = ["region", "full"];
         if !valid_speed_modes.contains(&self.speed_test.mode.as_str()) {

@@ -1,13 +1,89 @@
 use crate::config::Config;
 use crate::dns;
-use crate::ip_loader::load_ips;
+use crate::ip_loader::load_ips_excluding;
 use crate::output::{export_csv, print_scan_summary, print_speed_params, print_speed_table};
-use crate::scanner::scan_ips;
+use crate::scanner::{scan_ips, scan_ips_quiet};
 use crate::speed_tester::run_speed_tests;
-use crate::types::ScanState;
+use crate::types::{IpResult, ScanState};
 use crate::web::WebState;
 use anyhow::Result;
+use std::collections::HashSet;
+use std::net::IpAddr;
 use tracing::{error, info};
+
+/// 加载 IP 并扫描延迟，得到最终结果。
+///
+/// - `scan.regions` 为空：老行为，一次性采样 `max_ips` 个随机 IP，扫完就结束
+///   （不管扫描出多少个可用结果，都不会再补扫）。
+/// - `scan.regions` 非空：`max_ips` 变成"目标数量"——凑够这么多个属于目标地区
+///   且延迟达标的 IP 才停止；每批采样 `batch_size` 个（不重复已扫过的 IP），
+///   扫完累加命中数，不够就再取下一批，直到凑够 max_ips 个，
+///   或扫满 max_scan_rounds 轮，或候选池已经耗尽（当批采样不到任何新 IP）为止。
+async fn load_and_scan(config: &Config) -> Result<Vec<IpResult>> {
+    let scan_cfg = &config.scan;
+    let target = scan_cfg.max_ips.unwrap_or(8000);
+
+    // regions 为空：老行为，一次性扫一批就结束
+    if scan_cfg.regions.is_empty() {
+        let ips = load_ips_excluding(&scan_cfg.mode, scan_cfg.max_ips, &HashSet::new())?;
+        return scan_ips(ips, scan_cfg).await;
+    }
+
+    // regions 非空：分批扫描，直到凑够 target 个目标地区达标 IP
+    let mut all_results: Vec<IpResult> = Vec::new();
+    let mut scanned_ips: HashSet<IpAddr> = HashSet::new();
+
+    for round in 1..=scan_cfg.max_scan_rounds {
+        let remaining = target.saturating_sub(all_results.len());
+        if remaining == 0 {
+            break;
+        }
+
+        // 每批采样 batch_size 个新 IP（跳过之前已扫过的），不用刻意对齐 remaining，
+        // 采样量足够时可以一次性凑够，采样量不够时多扫几轮
+        let batch_ips = load_ips_excluding(&scan_cfg.mode, Some(scan_cfg.batch_size), &scanned_ips)?;
+
+        if batch_ips.is_empty() {
+            println!(
+                "  地区过滤模式：候选池已耗尽（尝试第 {} 轮时采样不到新 IP），停止扫描",
+                round
+            );
+            break;
+        }
+
+        if round > 1 {
+            println!(
+                "  地区过滤模式：目标 {} 个，已凑够 {} 个，补扫第 {} 轮（{} 个新 IP）",
+                target, all_results.len(), round, batch_ips.len()
+            );
+        }
+
+        for ip in &batch_ips {
+            scanned_ips.insert(*ip);
+        }
+
+        let mut batch_results = if round == 1 {
+            scan_ips(batch_ips, scan_cfg).await?
+        } else {
+            scan_ips_quiet(batch_ips, scan_cfg).await?
+        };
+        all_results.append(&mut batch_results);
+    }
+
+    if all_results.len() < target {
+        println!(
+            "  地区过滤模式：最终凑到 {} 个（目标 {}），候选池已耗尽或已达最大轮数 {}",
+            all_results.len(), target, scan_cfg.max_scan_rounds
+        );
+    }
+
+    // 多批结果合并后，整体按延迟重新排序（每批内部已经排过，合并后顺序会打乱）
+    all_results.sort_by_key(|r| r.delay_ms);
+    // 按 target 截断，避免因为最后一批"批量凑数"导致结果比目标多出一批的量
+    all_results.truncate(target);
+
+    Ok(all_results)
+}
 
 /// 完整流程：扫描延迟 → 测速 → DNS 同步
 /// web_state: daemon 模式下传入，用于更新 Web 状态页；单次模式传 None
@@ -17,11 +93,8 @@ pub async fn run_full(config: &Config, web_state: Option<&WebState>) -> Result<(
         ws.set_scanning(true);
     }
 
-    // 1. 加载 IP 列表
-    let ips = load_ips(&config.scan.mode, config.scan.max_ips)?;
-
-    // 2. 扫描延迟
-    let mut results = scan_ips(ips, &config.scan).await?;
+    // 1&2. 加载 IP 并扫描延迟（regions 非空时会自动分批凑够 max_ips 个目标地区结果）
+    let mut results = load_and_scan(config).await?;
 
     if results.is_empty() {
         println!("没有找到延迟达标的 IP，退出");
@@ -98,8 +171,7 @@ pub async fn run_full(config: &Config, web_state: Option<&WebState>) -> Result<(
 
 /// 仅扫描延迟，不测速，不保存 state_file
 pub async fn run_scan_only(config: &Config) -> Result<()> {
-    let ips = load_ips(&config.scan.mode, config.scan.max_ips)?;
-    let results = scan_ips(ips, &config.scan).await?;
+    let results = load_and_scan(config).await?;
     print_scan_summary(&results);
     Ok(())
 }
