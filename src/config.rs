@@ -42,6 +42,14 @@ pub struct ScanConfig {
     /// 随机采样 IP 数量上限
     #[serde(default = "default_max_ips")]
     pub max_ips: Option<usize>,
+
+    /// 扫描阶段就按地区过滤（三字码，如 ["LAX","SJC"]）。
+    /// 拿到 colo 后立刻判断，不在列表里的 IP 直接丢弃，不进入后续结果。
+    /// 空列表 = 不过滤（默认，兼容旧行为）。
+    /// 注意：仍然需要对每个延迟达标的 IP 做一次 fetch_colo 请求才能知道它属于哪个地区，
+    /// 这一步开销和不加过滤时相同，只是拿到 colo 后多一次比较、提前丢弃不匹配的结果。
+    #[serde(default)]
+    pub regions: Vec<String>,
 }
 
 /// 测速配置（新增 download_threads / speed_concurrency）

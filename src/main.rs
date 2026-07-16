@@ -259,6 +259,7 @@ delay_threshold = 220   # ms，超过则丢弃
 ping_count = 2
 tcp_timeout_ms = 1000
 max_ips = 5000          # 随机采样上限，删除此行则全量扫描
+# regions = ["LAX", "SJC"]   # 扫描阶段就按地区过滤，不填=不限制
 
 [speed_test]
 auto_run = true
