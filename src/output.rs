@@ -13,9 +13,6 @@ pub fn print_scan_params(cfg: &ScanConfig, total_ips: usize) {
     println!("  并发数      : {}", cfg.concurrency);
     println!("  延迟上限    : {} ms", cfg.delay_threshold);
     println!("  Ping 次数   : {}", cfg.ping_count);
-    if !cfg.regions.is_empty() {
-        println!("  地区过滤    : {}（扫描阶段即过滤，不达标地区不计入结果）", cfg.regions.join(", "));
-    }
     println!("  IP 总数     : {}", total_ips);
     println!();
 }

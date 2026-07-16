@@ -90,19 +90,6 @@ async fn scan_single(ip: IpAddr, cfg: &ScanConfig) -> Option<IpResult> {
         return None;
     }
     let colo = fetch_colo(ip, cfg.port).await?;
-
-    // 扫描阶段地区过滤：cfg.regions 非空时，只保留匹配的地区
-    if !cfg.regions.is_empty() {
-        let matched = cfg
-            .regions
-            .iter()
-            .any(|reg| reg.eq_ignore_ascii_case(&colo));
-        if !matched {
-            debug!("{} colo={} 不在目标地区，丢弃", ip, colo);
-            return None;
-        }
-    }
-
     Some(IpResult::new(ip.to_string(), cfg.port, delay, colo))
 }
 
