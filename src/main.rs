@@ -268,6 +268,8 @@ top_n = 10
 download_bytes = 10485760
 duration_ms = 3000
 connect_timeout_ms = 3000
+min_speed_mbps = 2.0    # 低于此速度不算达标，会自动补测下一批；0=不限制
+max_batches = 3         # 最多补测几批（含第一批）
 
 [schedule]
 enable = false          # true + 合法 cron → daemon 模式

@@ -9,7 +9,13 @@
 //!   4. 综合评分 score = speed*0.6 - latency*0.3 - loss_rate*0.1
 //!      替代原来纯按速度排序，低延迟+高速度的 IP 排得更靠前
 //!   5. 测速并发数从配置读取（speed_concurrency），默认 3
-//!   6. 每个 IP 测速失败时自动重试一次
+//!   6. 每个 IP 测速失败时自动重试一次，重试用缩短的 duration 快速确认，
+//!      避免重试也等满一整个 duration_ms
+//!   7. 达标速度过滤 + 分批补测（min_speed_mbps / max_batches）：
+//!      按延迟顺序先测第一批 top_n 个 IP，如果达标（speed_mbps >= min_speed_mbps）
+//!      的数量不够 dns.max_records 个，就从候选池里接着取下一批（同样大小）继续测，
+//!      直到达标数够了、候选池耗尽、或测满 max_batches 批为止。
+//!      min_speed_mbps <= 0 时该功能关闭，行为与之前一致（只测第一批 top_n 个）。
 
 use crate::config::SpeedTestConfig;
 use crate::types::IpResult;
@@ -28,9 +34,10 @@ pub async fn run_speed_tests(
     results: &mut Vec<IpResult>,
     cfg: &SpeedTestConfig,
     regions_filter: Option<&[String]>,
+    required_qualified: usize,
 ) -> Result<()> {
-    // 筛选：按地区过滤 + 只取前 top_n 个
-    let indices: Vec<usize> = results
+    // 候选池：按地区过滤后的全部下标，顺序即 results 现有顺序（外部已按延迟升序排好）
+    let candidates: Vec<usize> = results
         .iter()
         .enumerate()
         .filter(|(_, r)| {
@@ -38,23 +45,93 @@ pub async fn run_speed_tests(
                 .map(|regions| regions.iter().any(|reg| reg.eq_ignore_ascii_case(&r.colo)))
                 .unwrap_or(true)
         })
-        .take(cfg.top_n)
         .map(|(i, _)| i)
         .collect();
 
-    let total = indices.len();
-    if total == 0 {
+    if candidates.is_empty() {
         println!("  没有符合条件的 IP 可供测速");
         return Ok(());
     }
 
-    // 测速并发：同时对几个 IP 测速（区别于每个 IP 内部的多线程下载）
+    let batch_size = cfg.top_n.max(1);
+    let min_speed = cfg.min_speed_mbps;
+    // min_speed_mbps <= 0 表示不限制：只测第一批就结束，等价于旧行为
+    let batching_enabled = min_speed > 0.0;
+    let max_batches = if batching_enabled { cfg.max_batches.max(1) } else { 1 };
+    // 达标数量目标：优先用调用方传入的 dns.max_records，至少测够 batch_size 保底
+    let target_qualified = if batching_enabled {
+        required_qualified.max(1)
+    } else {
+        usize::MAX // 不限制时不提前停批（反正只有 1 批）
+    };
+
+    let mut tested_count = 0usize;
+    let mut qualified_count = 0usize;
+    let mut cursor = 0usize; // 候选池游标
+
+    for batch_no in 1..=max_batches {
+        if cursor >= candidates.len() {
+            break;
+        }
+        let end = (cursor + batch_size).min(candidates.len());
+        let batch_indices = &candidates[cursor..end];
+        cursor = end;
+
+        if batching_enabled && batch_no > 1 {
+            println!(
+                "  达标 IP 不足（{}/{}），补测第 {} 批，共 {} 个候选",
+                qualified_count, target_qualified, batch_no, batch_indices.len()
+            );
+        }
+
+        let batch_qualified = run_one_batch(results, batch_indices, cfg, tested_count).await;
+        tested_count += batch_indices.len();
+        qualified_count += batch_qualified;
+
+        if qualified_count >= target_qualified {
+            break;
+        }
+        if cursor >= candidates.len() {
+            println!(
+                "  候选池已耗尽，达标 IP 共 {} 个（目标 {}）",
+                qualified_count, target_qualified
+            );
+            break;
+        }
+    }
+
+    // 按综合评分降序，没有评分（测速失败）的排到最后
+    results.sort_by(|a, b| {
+        let sa = a.score.unwrap_or(f64::NEG_INFINITY);
+        let sb = b.score.unwrap_or(f64::NEG_INFINITY);
+        sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    if batching_enabled {
+        println!(
+            "  测速结束：共测 {} 个 IP，达标（>= {:.2} MB/s）{} 个",
+            tested_count, min_speed, qualified_count
+        );
+    }
+
+    Ok(())
+}
+
+/// 对一批下标做并发测速，写回 results，返回本批中"达标"（speed_mbps >= min_speed_mbps）的数量。
+/// min_speed_mbps <= 0 时视为不限制，测速成功即算达标。
+async fn run_one_batch(
+    results: &mut Vec<IpResult>,
+    batch_indices: &[usize],
+    cfg: &SpeedTestConfig,
+    already_done: usize,
+) -> usize {
+    let total_in_batch = batch_indices.len();
     let speed_concurrency = cfg.speed_concurrency.max(1);
     let sem = Arc::new(Semaphore::new(speed_concurrency));
     let cfg_arc = Arc::new(cfg.clone());
     let mut handles = Vec::new();
 
-    for &idx in &indices {
+    for &idx in batch_indices {
         let ip   = results[idx].ip.clone();
         let port = results[idx].port;
         let delay = results[idx].delay_ms;
@@ -68,28 +145,39 @@ pub async fn run_speed_tests(
     }
 
     let mut done = 0usize;
+    let mut qualified = 0usize;
     for handle in handles {
         match handle.await {
             Ok((idx, delay_ms, Ok((speed_mbps, elapsed_ms, total_mb)))) => {
                 done += 1;
                 results[idx].speed_mbps = Some(speed_mbps);
-                // 计算综合评分写回
                 results[idx].score = Some(calculate_score(speed_mbps, delay_ms, 0.0));
+
+                let is_qualified = cfg.min_speed_mbps <= 0.0 || speed_mbps >= cfg.min_speed_mbps;
+                if is_qualified {
+                    qualified += 1;
+                }
+                let mark = if cfg.min_speed_mbps > 0.0 {
+                    if is_qualified { " [达标]" } else { " [不达标]" }
+                } else {
+                    ""
+                };
                 println!(
-                    "  [{}/{}] {:<20} | {:>4}ms | {:>7.2} MB/s | {:.2}MB/{:.1}s",
-                    done, total,
+                    "  [{}/{}] {:<20} | {:>4}ms | {:>7.2} MB/s | {:.2}MB/{:.1}s{}",
+                    already_done + done, already_done + total_in_batch,
                     results[idx].ip,
                     delay_ms,
                     speed_mbps,
                     total_mb,
                     elapsed_ms / 1000.0,
+                    mark,
                 );
             }
             Ok((idx, _, Err(e))) => {
                 done += 1;
                 println!(
                     "  [{}/{}] {:<20} | 测速失败: {}",
-                    done, total, results[idx].ip, e
+                    already_done + done, already_done + total_in_batch, results[idx].ip, e
                 );
                 warn!("{} 测速失败: {}", results[idx].ip, e);
             }
@@ -99,14 +187,7 @@ pub async fn run_speed_tests(
         }
     }
 
-    // 按综合评分降序，没有评分（测速失败）的排到最后
-    results.sort_by(|a, b| {
-        let sa = a.score.unwrap_or(-1.0);
-        let sb = b.score.unwrap_or(-1.0);
-        sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    Ok(())
+    qualified
 }
 
 // ── 评分公式（对应 p-box calculateScoreWithLoss）───────────────────────────
@@ -137,7 +218,12 @@ fn measure_speed_with_retry(
             debug!("{} 第一次测速失败({})，重试...", ip, e);
             // 重试前等 200ms，避免立即再次超时
             std::thread::sleep(Duration::from_millis(200));
-            measure_speed_multiconn(ip, port, cfg)
+
+            // 重试用缩短的 duration（最短 2s），只为快速确认这个 IP 是否真的不可用，
+            // 避免第一次已经等了 duration_ms，重试又完整等一遍导致该 IP 总耗时翻倍
+            let mut retry_cfg = cfg.clone();
+            retry_cfg.duration_ms = (cfg.duration_ms / 2).max(2000).min(cfg.duration_ms);
+            measure_speed_multiconn(ip, port, &retry_cfg)
         }
     }
 }

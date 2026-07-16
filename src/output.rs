@@ -30,6 +30,12 @@ pub fn print_speed_params(config: &Config, regions_filter: Option<&[String]>) {
     println!("  同时测速 IP   : {} 个", cfg.speed_concurrency);
     println!("  每连接下载量  : {} MB", cfg.download_bytes / 1024 / 1024);
     println!("  持续时长      : {} ms", cfg.duration_ms);
+    if cfg.min_speed_mbps > 0.0 {
+        println!(
+            "  达标速度下限  : {:.2} MB/s（不足 {} 个达标会自动补测下一批，最多 {} 批）",
+            cfg.min_speed_mbps, config.dns.max_records, cfg.max_batches
+        );
+    }
     println!("  评分公式      : speed×0.6 - latency×0.3 - loss×0.1");
     println!();
     println!("  IP                  延迟     速度        评分");

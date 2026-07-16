@@ -83,7 +83,19 @@ pub struct SpeedTestConfig {
     /// 测速 TLS 连接超时（ms）
     #[serde(default = "default_speed_timeout")]
     pub connect_timeout_ms: u64,
+
+    /// 速度达标下限（MB/s）。低于此值的 IP 不计入"达标"结果，
+    /// 会继续从候选池取下一批 IP 补测，直到凑够 dns.max_records 个达标 IP 或候选池耗尽。
+    /// 不填或 <=0 表示不限制（测完 top_n 就结束，行为与之前一致）。
+    #[serde(default)]
+    pub min_speed_mbps: f64,
+
+    /// 补测时最多再取几批（每批大小 = top_n）。
+    /// 防止候选池里全是慢 IP 时无限测下去。
+    #[serde(default = "default_max_batches")]
+    pub max_batches: usize,
 }
+
 
 /// 定时调度配置
 #[derive(Debug, Deserialize, Clone)]
@@ -141,6 +153,7 @@ fn default_speed_concurrency() -> usize        { 3 }   // 同时测 3 个 IP
 fn default_download_bytes()    -> usize        { 100 * 1024 * 1024 } // 每连接 100MB
 fn default_speed_duration()    -> u64          { 8000 } // 8 秒
 fn default_speed_timeout()     -> u64          { 5000 }
+fn default_max_batches()       -> usize        { 3 }   // 最多再补测 3 批
 fn default_cron()              -> String       { "0 */6 * * *".into() }
 fn default_record_type()       -> String       { "A".into() }
 fn default_max_records()       -> usize        { 5 }
@@ -184,6 +197,12 @@ impl Config {
         }
         if self.speed_test.mode == "region" && self.speed_test.regions.is_empty() {
             anyhow::bail!("speed_test.mode=region 时，speed_test.regions 不能为空");
+        }
+        if self.speed_test.min_speed_mbps < 0.0 {
+            anyhow::bail!("speed_test.min_speed_mbps 不能为负数");
+        }
+        if self.speed_test.max_batches == 0 {
+            anyhow::bail!("speed_test.max_batches 必须 >= 1");
         }
         if self.dns.enable {
             if self.dns.token.is_none()   { anyhow::bail!("dns.enable=true 时必须提供 dns.token");   }

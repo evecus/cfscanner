@@ -42,7 +42,13 @@ pub async fn run_full(config: &Config, web_state: Option<&WebState>) -> Result<(
         };
 
         print_speed_params(config, regions_filter);
-        run_speed_tests(&mut results, &config.speed_test, regions_filter).await?;
+        run_speed_tests(
+            &mut results,
+            &config.speed_test,
+            regions_filter,
+            config.dns.max_records,
+        )
+        .await?;
 
         let speed_results: Vec<_> = results
             .into_iter()
@@ -134,7 +140,13 @@ pub async fn run_speed_only(
     };
 
     print_speed_params(config, regions_filter);
-    run_speed_tests(&mut state.results, &config.speed_test, regions_filter).await?;
+    run_speed_tests(
+        &mut state.results,
+        &config.speed_test,
+        regions_filter,
+        config.dns.max_records,
+    )
+    .await?;
 
     let speed_results: Vec<_> = state
         .results

@@ -20,10 +20,32 @@ pub async fn sync_dns_with_log(results: &[IpResult], config: &Config) -> Result<
     let token = dns.token.as_ref().context("dns.token 未配置")?.clone();
     let zone_id = dns.zone_id.as_ref().context("dns.zone_id 未配置")?.clone();
 
-    let top_ips: Vec<IpResult> = results.iter().take(dns.max_records).cloned().collect();
+    // 速度达标过滤：min_speed_mbps <= 0 时不过滤（保留旧行为）
+    // results 此时已按综合评分（score）降序排好，所以这里保持顺序，
+    // 只是从"全部结果"改为"达标结果"里取前 max_records 个
+    let min_speed = config.speed_test.min_speed_mbps;
+    let top_ips: Vec<IpResult> = results
+        .iter()
+        .filter(|r| min_speed <= 0.0 || r.speed_mbps.unwrap_or(0.0) >= min_speed)
+        .take(dns.max_records)
+        .cloned()
+        .collect();
+
     if top_ips.is_empty() {
-        warn!("没有可同步的 IP");
-        return Ok(vec!["没有可同步的 IP".to_string()]);
+        let msg = if min_speed > 0.0 {
+            format!("没有速度达标（>= {:.2} MB/s）的 IP 可同步", min_speed)
+        } else {
+            "没有可同步的 IP".to_string()
+        };
+        warn!("{}", msg);
+        return Ok(vec![msg]);
+    }
+
+    if min_speed > 0.0 && top_ips.len() < dns.max_records {
+        warn!(
+            "达标 IP 只有 {} 个，少于配置的 max_records={}，仅同步这 {} 条",
+            top_ips.len(), dns.max_records, top_ips.len()
+        );
     }
 
     println!();
